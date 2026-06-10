@@ -40,7 +40,7 @@ tests/test_core.py
 ## Status
 
 - **Palette management: functional.** Import opens a palette/material grid editor (see below), plus export by material, validate, and the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
-- **Palette Lab: functional.** Live palette adjustment on indexed images: hue/saturation/brightness/contrast on a grid selection, instant preview on a duplicate image, Commit to chain adjustments, Apply writes back to the original (and yields a GIMP palette). Worm indices locked by default.
+- **Palette Lab: functional.** Live palette adjustment on indexed images: hue/saturation/brightness/contrast/temperature (+ colorize mode for grays and a make-gradient re-ramp tool) on a grid selection, with an in-dialog preview canvas that can also show any `.lev` map, `.wlsprt` sprite sheet or indexed `.png`. The palette source can be the image colormap or a GIMP palette (toolkit palettes carry materials in entry names). Float-precision pipeline; Commit chains adjustments; Apply writes back unique colors and keeps a GIMP palette. Worm indices locked by default.
 - **Material quantizer: draft shell.** The core quantizer is tested; GIMP pixel extraction is next.
 
 ### Supported palette sources
@@ -66,7 +66,7 @@ Interactive import opens a 16x16 swatch grid of the loaded palette:
 - double-click a swatch to edit its color
 - a material-table text field below the grid: paste a room-script expression (`materials: defaultMaterials.map(noUndef).map(replaceMatIndexBy(MATERIAL.BG,..._range(189,208))),` — helpers `noUndef`, `undefToDirt`, `replaceMatIndexBy`, `..._range` are understood) or a plain array, hit *Apply text to grid*; after edits the field shows the regenerated copy-ready expression
 - *Save materials…* writes the (edited) table to a JSON or room-script `.js` file (fallback to the text field)
-- *Create Palette* creates the GIMP palette (entry names carry the materials, e.g. `042 ROCK`) and can apply it to the active indexed image
+- *Create Palette* creates the GIMP palette (entry names carry the materials, e.g. `042 ROCK`) and can apply it to the active indexed image — applied colormaps are automatically made **unique** (minimal nudges on duplicates) since GIMP can't tell identical colors apart
 
 ### WebLiero Extended custom material tables
 

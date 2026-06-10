@@ -104,6 +104,62 @@ def read_wlsprt_palette(path: str | Path) -> Palette:
     return Palette(path.stem, _colors_from_bytes(block, six_bit=False))
 
 
+def read_wlsprt_sprites(path: str | Path, max_sprites: int | None = None):
+    """Extract sprites from a WLSPRT file as (width, height, index_bytes)."""
+    path = Path(path)
+    raw = path.read_bytes()
+    _check_wlsprt(raw, path)
+    off = WLSPRT_PALETTE_OFFSET + (768 if raw[8] else 0)
+    nsprites = int.from_bytes(raw[off:off + 2], "little")
+    off += 2
+    sprites = []
+    for _ in range(nsprites):
+        if off + 8 > len(raw):
+            break
+        w = int.from_bytes(raw[off:off + 2], "little", signed=True)
+        h = int.from_bytes(raw[off + 2:off + 4], "little", signed=True)
+        if w <= 0 or h <= 0:
+            break
+        data = raw[off + 8:off + 8 + w * h]
+        if len(data) < w * h:
+            break
+        sprites.append((w, h, data))
+        off += 8 + w * h
+        if max_sprites is not None and len(sprites) >= max_sprites:
+            break
+    return sprites
+
+
+def wlsprt_sheet(path: str | Path, sheet_width: int = 320,
+                 background: int = 0):
+    """Lay WLSPRT sprites out as one indexed sheet: (width, height, indices)."""
+    sprites = read_wlsprt_sprites(path)
+    if not sprites:
+        raise ValueError(f"No sprites in WLSPRT file: {path}")
+    pad = 1
+    rows = []
+    row, row_w, row_h = [], 0, 0
+    for w, h, data in sprites:
+        if row and row_w + w + pad > sheet_width:
+            rows.append((row, row_h))
+            row, row_w, row_h = [], 0, 0
+        row.append((row_w, w, h, data))
+        row_w += w + pad
+        row_h = max(row_h, h)
+    if row:
+        rows.append((row, row_h))
+    height = sum(h + pad for _, h in rows)
+    sheet = bytearray([background]) * (sheet_width * height)
+    y = 0
+    for row, row_h in rows:
+        for x0, w, h, data in row:
+            for yy in range(h):
+                dst = (y + yy) * sheet_width + x0
+                sheet[dst:dst + w] = data[yy * w:(yy + 1) * w]
+        y += row_h + pad
+    return sheet_width, height, bytes(sheet)
+
+
 def write_wlsprt_palette(src: str | Path, palette: Palette, dest: str | Path | None = None) -> None:
     """Replace (or insert) the palette of a WLSPRT file, keeping sprites intact."""
     src = Path(src)
@@ -157,6 +213,14 @@ def read_exe_materials(path: str | Path) -> List[int]:
     for j in range(256):
         materials[j] |= ((bits[j >> 3] >> (j & 7)) & 1) << 5
     return materials
+
+
+def read_lev_pixels(path: str | Path):
+    """Pixel indices of a .lev map: (width, height, index_bytes)."""
+    raw = Path(path).read_bytes()
+    if len(raw) < LEV_PIXELS:
+        raise ValueError(f"Not a .lev file (smaller than {LEV_PIXELS} bytes): {path}")
+    return LEV_WIDTH, LEV_HEIGHT, raw[:LEV_PIXELS]
 
 
 # --- .lev (POWERLEVEL) -------------------------------------------------------
