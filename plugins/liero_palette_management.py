@@ -35,7 +35,7 @@ import json
 
 from liero_core.palette import Palette
 from liero_core.formats import load_palette
-from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js
+from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js, parse_material_text
 from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS
 
 PROC_IMPORT = 'python-fu-liero-palette-import'
@@ -105,8 +105,8 @@ def validation_report(pal: Palette, table=None) -> str:
         f"{name}={len(idxs)}" for name, idxs in sorted(counts.items())))
     protected = [i for i in range(256) if index_info(i, table).protected]
     animated = [i for i in range(256) if index_info(i, table).animated]
-    lines.append(f"Protected indices: {len(protected)} (worm + animated)")
-    lines.append(f"Animated indices: {animated}")
+    lines.append(f"Protected indices (worm): {protected}")
+    lines.append(f"Animated indices (default colorAnim, mod-configurable): {animated}")
     if dupes:
         lines.append(f"Duplicate RGB values: {len(dupes)}")
         for color, idxs in sorted(dupes.items())[:10]:
@@ -152,9 +152,10 @@ if Gimp is not None:
             self.dialog.add_button('Create _Palette', Gtk.ResponseType.OK)
             self.dialog.set_default_response(Gtk.ResponseType.OK)
 
-            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
-                           margin=12)
-            self.dialog.get_content_area().add(hbox)
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+            self.dialog.get_content_area().add(vbox)
+            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            vbox.pack_start(hbox, True, True, 0)
 
             self.area = Gtk.DrawingArea()
             self.area.set_size_request(CELL * 16, CELL * 16)
@@ -213,6 +214,31 @@ if Gimp is not None:
                            'Double-click: edit color · dot = animated</small>')
             side.pack_end(tip, False, False, 0)
 
+            # material table as text: paste a room-script expression or array
+            # here, or copy the regenerated expression back into mapsettings.js
+            vbox.pack_start(Gtk.Label(
+                label='Material table (room-script expression or array — paste & apply, or copy out):',
+                xalign=0), False, False, 0)
+            text_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            vbox.pack_start(text_row, False, False, 0)
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_size_request(-1, 80)
+            self.text_view = Gtk.TextView()
+            self.text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            self.text_view.set_monospace(True)
+            scroll.add(self.text_view)
+            text_row.pack_start(scroll, True, True, 0)
+            text_btns = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            apply_text = Gtk.Button(label='Apply text to grid')
+            apply_text.connect('clicked', self._on_apply_text)
+            text_btns.pack_start(apply_text, False, False, 0)
+            refresh_text = Gtk.Button(label='Refresh from grid')
+            refresh_text.connect('clicked', lambda _b: self._refresh_text())
+            text_btns.pack_start(refresh_text, False, False, 0)
+            text_row.pack_start(text_btns, False, False, 0)
+
+            self._refresh_text()
             self._update_info()
 
         # -- drawing ----------------------------------------------------------
@@ -280,6 +306,7 @@ if Gimp is not None:
             value = int(self.material_combo.get_active_id())
             for i in self.selected:
                 self.table[i] = value
+            self._refresh_text()
             self._update_info()
             self.area.queue_draw()
 
@@ -306,6 +333,21 @@ if Gimp is not None:
                                     round(rgba.blue * 255))
             chooser.destroy()
             self._update_info(idx)
+            self.area.queue_draw()
+
+        def _refresh_text(self):
+            self.text_view.get_buffer().set_text(
+                "materials: " + material_table_to_js(self.table) + ",")
+
+        def _on_apply_text(self, _btn):
+            buf = self.text_view.get_buffer()
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+            try:
+                self.table = parse_material_text(text)
+            except Exception as exc:
+                self.info.set_text(f"Material text error: {exc}")
+                return
+            self._update_info()
             self.area.queue_draw()
 
         def _on_save_materials(self, _btn):
