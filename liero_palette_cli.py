@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
+"""Liero palette toolkit CLI.
+
+Palette sources: .gpl, indexed .png (needs Pillow), .lpl, .wlsprt,
+POWERLEVEL .lev, decompressed LIERO.EXE.
+"""
 from __future__ import annotations
 import argparse, json
 from pathlib import Path
-from liero_core.palette import read_gpl, load_indexed_png_palette, Palette
+from liero_core.palette import Palette
+from liero_core.formats import load_palette, write_lpl, write_wlsprt_palette, write_lev_palette
 from liero_core.material import index_info, indices_for_material
-from liero_core.defaults import MATERIAL, MATERIAL_NAMES
-
-
-def load_palette(path: Path) -> Palette:
-    if path.suffix.lower() == ".gpl":
-        return read_gpl(path).padded256()
-    if path.suffix.lower() == ".png":
-        return load_indexed_png_palette(path).padded256()
-    raise SystemExit(f"Unsupported palette source: {path}")
+from liero_core.defaults import MATERIAL
 
 
 def cmd_validate(args):
-    pal = load_palette(Path(args.input))
+    pal = load_palette(Path(args.input)).padded256()
     dupes = pal.unique_report()
     report = []
     for i, rgb in enumerate(pal.colors[:256]):
@@ -34,7 +32,7 @@ def cmd_validate(args):
 
 
 def cmd_split(args):
-    pal = load_palette(Path(args.input))
+    pal = load_palette(Path(args.input)).padded256()
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     for mat_name, mat_value in MATERIAL.items():
@@ -44,16 +42,57 @@ def cmd_split(args):
     print(f"Wrote material palettes to {outdir}")
 
 
+def cmd_convert(args):
+    pal = load_palette(Path(args.input)).padded256()
+    out = Path(args.output)
+    suffix = out.suffix.lower()
+    if suffix == ".gpl":
+        pal.to_gpl(out)
+    elif suffix == ".lpl":
+        write_lpl(out, pal)
+    else:
+        raise SystemExit(f"Unsupported convert target (use .gpl or .lpl): {out}")
+    print(f"Wrote {out}")
+
+
+def cmd_apply(args):
+    pal = load_palette(Path(args.palette)).padded256()
+    target = Path(args.target)
+    dest = Path(args.output) if args.output else target
+    suffix = target.suffix.lower()
+    if suffix == ".wlsprt":
+        write_wlsprt_palette(target, pal, dest)
+    elif suffix == ".lev":
+        write_lev_palette(target, pal, dest)
+    else:
+        raise SystemExit(f"Apply target must be a .wlsprt or .lev file: {target}")
+    print(f"Applied palette {pal.name!r} to {dest}")
+
+
 def main():
     p = argparse.ArgumentParser(description="Liero palette toolkit CLI")
     sub = p.add_subparsers(required=True)
-    v = sub.add_parser("validate")
+
+    v = sub.add_parser("validate", help="JSON report of a palette (any supported source)")
     v.add_argument("input")
     v.set_defaults(func=cmd_validate)
-    s = sub.add_parser("split")
+
+    s = sub.add_parser("split", help="export one .gpl per material")
     s.add_argument("input")
     s.add_argument("output")
     s.set_defaults(func=cmd_split)
+
+    c = sub.add_parser("convert", help="convert any palette source to .gpl or .lpl")
+    c.add_argument("input")
+    c.add_argument("output")
+    c.set_defaults(func=cmd_convert)
+
+    a = sub.add_parser("apply", help="write a palette into a .wlsprt or .lev file")
+    a.add_argument("palette", help="palette source (any supported format)")
+    a.add_argument("target", help=".wlsprt or .lev file to receive the palette")
+    a.add_argument("-o", "--output", help="write to this file instead of modifying target in place")
+    a.set_defaults(func=cmd_apply)
+
     args = p.parse_args()
     args.func(args)
 
