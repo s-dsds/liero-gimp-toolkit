@@ -119,19 +119,7 @@ def validation_report(pal: Palette, table=None) -> str:
 
 
 if Gimp is not None:
-    CELL = 30  # swatch size in px; grid is 16x16 cells
-
-    MATERIAL_BADGE = {
-        MATERIAL['UNDEF']: '',
-        MATERIAL['DIRT']: 'D',
-        MATERIAL['DIRT_2']: 'D2',
-        MATERIAL['ROCK']: 'R',
-        MATERIAL['BG']: 'B',
-        MATERIAL['BG_DIRT']: 'BD',
-        MATERIAL['BG_DIRT_2']: 'B2',
-        MATERIAL['BG_SEESHADOW']: 'S',
-        MATERIAL['WORM']: 'W',
-    }
+    from liero_core.palette_grid import PaletteGrid
 
     class PaletteMaterialEditor:
         """Palette grid with on-the-fly material editing.
@@ -142,10 +130,10 @@ if Gimp is not None:
         """
 
         def __init__(self, colors, table, name, apply_default, can_apply):
-            self.colors = list(colors[:256])
-            self.table = list(table[:256])
-            self.selected = set()
-            self.last_click = 0
+            self.grid = PaletteGrid(colors, table,
+                                    hover_cb=self._update_info,
+                                    select_cb=self._update_info,
+                                    edit_cb=self._edit_color)
 
             self.dialog = GimpUi.Dialog(title='Liero Palette Editor')
             self.dialog.add_button('_Cancel', Gtk.ResponseType.CANCEL)
@@ -157,15 +145,8 @@ if Gimp is not None:
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
             vbox.pack_start(hbox, True, True, 0)
 
-            self.area = Gtk.DrawingArea()
-            self.area.set_size_request(CELL * 16, CELL * 16)
-            self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
-                                 | Gdk.EventMask.POINTER_MOTION_MASK)
-            self.area.connect('draw', self._on_draw)
-            self.area.connect('button-press-event', self._on_press)
-            self.area.connect('motion-notify-event', self._on_motion)
             frame = Gtk.Frame()
-            frame.add(self.area)
+            frame.add(self.grid.widget)
             hbox.pack_start(frame, False, False, 0)
 
             side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -241,64 +222,27 @@ if Gimp is not None:
             self._refresh_text()
             self._update_info()
 
-        # -- drawing ----------------------------------------------------------
+        # -- grid state (delegated to the shared widget) -----------------------
 
-        def _on_draw(self, widget, cr):
-            for i, (r, g, b) in enumerate(self.colors):
-                x, y = (i % 16) * CELL, (i // 16) * CELL
-                cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
-                cr.rectangle(x, y, CELL, CELL)
-                cr.fill()
-                lum = 0.299 * r + 0.587 * g + 0.114 * b
-                fg = (0, 0, 0) if lum > 128 else (1, 1, 1)
-                badge = MATERIAL_BADGE.get(self.table[i], '?')
-                if badge:
-                    cr.set_source_rgb(*fg)
-                    cr.set_font_size(9)
-                    cr.move_to(x + 2, y + CELL - 3)
-                    cr.show_text(badge)
-                if index_info(i, self.table).animated:
-                    cr.set_source_rgb(*fg)
-                    cr.arc(x + CELL - 5, y + 5, 2.2, 0, 6.2832)
-                    cr.fill()
-                if i in self.selected:
-                    cr.set_line_width(2)
-                    cr.set_source_rgb(1, 1, 1)
-                    cr.rectangle(x + 1, y + 1, CELL - 2, CELL - 2)
-                    cr.stroke()
-                    cr.set_line_width(1)
-                    cr.set_source_rgb(0, 0, 0)
-                    cr.rectangle(x + 2.5, y + 2.5, CELL - 5, CELL - 5)
-                    cr.stroke()
-            return False
+        @property
+        def colors(self):
+            return self.grid.colors
 
-        # -- events -----------------------------------------------------------
+        @property
+        def table(self):
+            return self.grid.table
 
-        @staticmethod
-        def _event_index(event):
-            col = min(15, max(0, int(event.x) // CELL))
-            row = min(15, max(0, int(event.y) // CELL))
-            return int(row * 16 + col)
+        @table.setter
+        def table(self, value):
+            self.grid.table = list(value)
 
-        def _on_press(self, widget, event):
-            idx = self._event_index(event)
-            if event.type == Gdk.EventType._2BUTTON_PRESS:
-                self._edit_color(idx)
-            elif event.state & Gdk.ModifierType.CONTROL_MASK:
-                self.selected.symmetric_difference_update({idx})
-            elif event.state & Gdk.ModifierType.SHIFT_MASK:
-                lo, hi = sorted((self.last_click, idx))
-                self.selected.update(range(lo, hi + 1))
-            else:
-                self.selected = {idx}
-            self.last_click = idx
-            self._update_info(idx)
-            self.area.queue_draw()
-            return True
+        @property
+        def selected(self):
+            return self.grid.selected
 
-        def _on_motion(self, widget, event):
-            self._update_info(self._event_index(event))
-            return False
+        @selected.setter
+        def selected(self, value):
+            self.grid.selected = set(value)
 
         # -- actions ----------------------------------------------------------
 
@@ -308,18 +252,15 @@ if Gimp is not None:
                 self.table[i] = value
             self._refresh_text()
             self._update_info()
-            self.area.queue_draw()
+            self.grid.queue_draw()
 
         def _on_select_material(self, _btn):
-            value = int(self.material_combo.get_active_id())
-            self.selected = {i for i, m in enumerate(self.table) if m == value}
+            self.grid.select_material(int(self.material_combo.get_active_id()))
             self._update_info()
-            self.area.queue_draw()
 
         def _on_clear(self, _btn):
-            self.selected = set()
+            self.grid.clear_selection()
             self._update_info()
-            self.area.queue_draw()
 
         def _edit_color(self, idx):
             chooser = Gtk.ColorChooserDialog(title=f'Color for index {idx}',
@@ -333,7 +274,7 @@ if Gimp is not None:
                                     round(rgba.blue * 255))
             chooser.destroy()
             self._update_info(idx)
-            self.area.queue_draw()
+            self.grid.queue_draw()
 
         def _refresh_text(self):
             self.text_view.get_buffer().set_text(
@@ -348,7 +289,7 @@ if Gimp is not None:
                 self.info.set_text(f"Material text error: {exc}")
                 return
             self._update_info()
-            self.area.queue_draw()
+            self.grid.queue_draw()
 
         def _on_save_materials(self, _btn):
             chooser = Gtk.FileChooserDialog(title='Save material table',

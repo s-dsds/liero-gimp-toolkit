@@ -40,7 +40,7 @@ tests/test_core.py
 ## Status
 
 - **Palette management: functional.** Import opens a palette/material grid editor (see below), plus export by material, validate, and the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
-- **Palette Lab: draft shell.** Transform helpers exist; the preview UI is next.
+- **Palette Lab: functional.** Live palette adjustment on indexed images: hue/saturation/brightness/contrast on a grid selection, instant preview on a duplicate image, Commit to chain adjustments, Apply writes back to the original (and yields a GIMP palette). Worm indices locked by default.
 - **Material quantizer: draft shell.** The core quantizer is tested; GIMP pixel extraction is next.
 
 ### Supported palette sources
@@ -118,10 +118,8 @@ grep -ao 'python-fu-liero[a-z-]*' ~/.config/GIMP/3.2/pluginrc | sort -u
 
 ### Palette Lab
 
-- Build the custom GTK window with material/index selectors.
-- Read the current indexed image palette via `Image.get_palette()`.
-- Preview changes on a duplicate image or temporary preview layer.
-- Apply changes back with `Image.set_palette()`.
+- Ramp smoothing, gradient remapping, per-channel curves (later spec items).
+- Optional color animation preview (cycle the colorAnim ranges).
 
 ### Material quantizer
 
