@@ -503,15 +503,46 @@ if Gimp is not None:
 
         # --- procedures ------------------------------------------------------
 
+        @staticmethod
+        def _choose_palette_file(preselect=None):
+            """Native file chooser for palette sources (no ProcedureDialog)."""
+            chooser = Gtk.FileChooserDialog(title='Open Liero Palette',
+                                            action=Gtk.FileChooserAction.OPEN)
+            chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
+            chooser.add_button('_Open', Gtk.ResponseType.OK)
+            chooser.set_default_response(Gtk.ResponseType.OK)
+            flt = Gtk.FileFilter()
+            flt.set_name('Liero palette sources')
+            for pattern in ('*.gpl', '*.png', '*.lpl', '*.wlsprt', '*.lev',
+                            '*.exe', 'LIERO.EXE'):
+                flt.add_pattern(pattern)
+                flt.add_pattern(pattern.upper())
+            chooser.add_filter(flt)
+            everything = Gtk.FileFilter()
+            everything.set_name('All files')
+            everything.add_pattern('*')
+            chooser.add_filter(everything)
+            if preselect:
+                chooser.set_filename(str(preselect))
+            path = None
+            if chooser.run() == Gtk.ResponseType.OK:
+                path = Path(chooser.get_filename())
+            chooser.destroy()
+            return path
+
         def run_import(self, procedure, run_mode, image, drawables, config, data):
             try:
-                if run_mode == Gimp.RunMode.INTERACTIVE:
-                    if not self._dialog(procedure, config, 'Import Liero Palette'):
-                        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
                 gfile = config.get_property('file')
-                if gfile is None:
+                if run_mode == Gimp.RunMode.INTERACTIVE:
+                    GimpUi.init(procedure.get_name())
+                    path = self._choose_palette_file(
+                        preselect=gfile.get_path() if gfile else None)
+                    if path is None:
+                        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+                elif gfile is None:
                     return self._error(procedure, 'No palette file selected.')
-                path = Path(gfile.get_path())
+                else:
+                    path = Path(gfile.get_path())
                 pal = load_palette_for_gimp(path)
                 table = self._materials_table(config) or list(DEFAULT_MATERIALS)
                 name = config.get_property('palette-name').strip() or f"Liero {path.stem}"
