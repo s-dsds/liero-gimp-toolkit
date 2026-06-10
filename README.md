@@ -39,7 +39,7 @@ tests/test_core.py
 
 ## Status
 
-- **Palette management: functional.** Import (any source below), export by material, validate, plus the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
+- **Palette management: functional.** Import opens a palette/material grid editor (see below), plus export by material, validate, and the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
 - **Palette Lab: draft shell.** Transform helpers exist; the preview UI is next.
 - **Material quantizer: draft shell.** The core quantizer is tested; GIMP pixel extraction is next.
 
@@ -55,6 +55,17 @@ tests/test_core.py
 | `LIERO.EXE` | decompressed 1.33 exe: palette @132774, materials @0x1C2E0, colorAnim @0x1AF0C (offsets from OpenLiero's tc_tool) |
 
 The CLI can also write `.lpl` files and patch a palette **into** a `.wlsprt` or `.lev` (turning it into a POWERLEVEL).
+
+### Palette editor (Import Palette...)
+
+Interactive import opens a 16x16 swatch grid of the loaded palette:
+
+- each swatch shows a material badge (D, D2, R, B, BD, B2, S, W; blank = UNDEF) and a dot on animated indices; hover for index details
+- click to select, Ctrl+click to toggle, Shift+click for ranges, or use *Select material* to grab a whole material at once
+- *Assign to selection* re-materials the selected indices on the fly
+- double-click a swatch to edit its color
+- *Save materials…* writes the (edited) table as JSON or a paste-ready WLE room-script `.js` expression
+- *Create Palette* creates the GIMP palette (entry names carry the materials, e.g. `042 ROCK`) and can apply it to the active indexed image
 
 ### WebLiero Extended custom material tables
 
