@@ -18,10 +18,11 @@ try:
 except Exception:
     Gimp = GimpUi = Gtk = GLib = None
 
+# liero_core sits next to the plugin file when installed, one level up in the repo.
 PLUGIN_DIR = Path(__file__).resolve().parent
-CORE_DIR = PLUGIN_DIR.parent
-if str(CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(CORE_DIR))
+for _candidate in (PLUGIN_DIR, PLUGIN_DIR.parent):
+    if (_candidate / 'liero_core').is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 from liero_core.material import indices_for_material
 from liero_core.defaults import MATERIAL, PROTECTED_BY_DEFAULT
@@ -55,6 +56,9 @@ def adjusted_palette(colors, indices, **kwargs):
 
 if Gimp is not None:
     class LieroPaletteLab(Gimp.PlugIn):
+        def do_set_i18n(self, name):
+            return False
+
         def do_query_procedures(self):
             return ['python-fu-liero-palette-lab']
 
@@ -64,7 +68,7 @@ if Gimp is not None:
             proc.set_menu_label('Liero Palette Lab...')
             proc.add_menu_path('<Image>/Liero')
             proc.set_documentation('Manipulate material palette ranges with preview.', 'First iteration UI shell.', name)
-            proc.set_attribution('AB Tasty AI / generated starter', 'OpenAI', '2026')
+            proc.set_attribution('liero-gimp-toolkit', 'liero-gimp-toolkit', '2026')
             return proc
 
         def run(self, procedure, run_mode, image, drawables, config, data):

@@ -46,26 +46,32 @@ GIMP 3's Python plug-in API maps to the C API through GObject Introspection, and
 ## Try the core without GIMP
 
 ```bash
-cd liero-gimp-toolkit-v0.1
-python3 -m pytest tests
-python3 liero_palette_cli.py validate some_palette.gpl
-python3 liero_palette_cli.py split some_palette.gpl out_palettes
+cd liero-gimp-toolkit
+uv venv .venv && uv pip install --python .venv/bin/python pytest pillow
+.venv/bin/python -m pytest tests
+.venv/bin/python liero_palette_cli.py validate some_palette.gpl
+.venv/bin/python liero_palette_cli.py split some_palette.gpl out_palettes
 ```
 
-For indexed PNG palette import, install Pillow:
+(Pillow is only needed for indexed PNG palette import.)
+
+## Install GIMP plug-ins on Linux
+
+Works with native or Flatpak GIMP 3.x (tested against Flatpak GIMP 3.2.4):
 
 ```bash
-python3 -m pip install pillow
-```
-
-## Install draft GIMP plug-ins on Linux
-
-```bash
-cd liero-gimp-toolkit-v0.1
+cd liero-gimp-toolkit
 ./install-linux-user.sh
 ```
 
 Restart GIMP and look for the `Liero` menu.
+
+To verify registration without opening the UI (Flatpak):
+
+```bash
+flatpak run org.gimp.GIMP -i -d -f --batch-interpreter=plug-in-script-fu-eval -b '(gimp-quit 0)'
+grep -ao 'python-fu-liero[a-z-]*' ~/.config/GIMP/3.2/pluginrc | sort -u
+```
 
 ## Next implementation steps
 
