@@ -11,7 +11,7 @@ This package contains specs and first-iteration code for three related projects:
 - `UNDEF` is **not** treated as unused. It is a valid shoot-through material.
 - Indices `188-235` are treated as **preferred replacement candidates**, not automatically unused.
 - `colorAnim = [129,131,133,136,152,159,168,171]` is a flat list of `(from, to)` **range pairs** (4 ranges, 19 animated indices), independent of materials. Confirmed against LIERO.EXE 1.33 (offset 0x1AF0C) and WebLiero's classic `mod.json`; the earlier `132` was a transcription error.
-- Worm and animated indices are protected by default.
+- Only worm indices are protected by default. Animated indices are informational — `colorAnim` is mod-configurable.
 - Classic Liero material semantics are hardcoded for the default workflow. The material table is verified against LIERO.EXE 1.33 and wgetch's WebLiero material reference (which agree byte-for-byte); the originally transcribed table had two blocks (160-171, 176-184) shifted by 4.
 
 ## Contents
@@ -64,7 +64,8 @@ Interactive import opens a 16x16 swatch grid of the loaded palette:
 - click to select, Ctrl+click to toggle, Shift+click for ranges, or use *Select material* to grab a whole material at once
 - *Assign to selection* re-materials the selected indices on the fly
 - double-click a swatch to edit its color
-- *Save materials…* writes the (edited) table as JSON or a paste-ready WLE room-script `.js` expression
+- a material-table text field below the grid: paste a room-script expression (`materials: defaultMaterials.map(noUndef).map(replaceMatIndexBy(MATERIAL.BG,..._range(189,208))),` — helpers `noUndef`, `undefToDirt`, `replaceMatIndexBy`, `..._range` are understood) or a plain array, hit *Apply text to grid*; after edits the field shows the regenerated copy-ready expression
+- *Save materials…* writes the (edited) table to a JSON or room-script `.js` file (fallback to the text field)
 - *Create Palette* creates the GIMP palette (entry names carry the materials, e.g. `042 ROCK`) and can apply it to the active indexed image
 
 ### WebLiero Extended custom material tables

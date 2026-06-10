@@ -21,6 +21,12 @@ def test_animated_index_info():
     assert index_info(155).animated is True
 
 
+def test_protected_is_worm_only():
+    assert index_info(30).protected is True    # worm
+    assert index_info(130).protected is False  # animated but not protected
+    assert index_info(19).protected is False   # rock
+
+
 def test_classify():
     assert classify_name('rock #2') == MATERIAL['ROCK']
     assert classify_name('background dirt') == MATERIAL['BG_DIRT']

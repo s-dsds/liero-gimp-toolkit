@@ -63,9 +63,10 @@ ANIMATED_INDICES = expand_color_anim(DEFAULT_COLOR_ANIM)
 
 PREFERRED_REPLACEMENT_INDICES = list(range(188, 236))
 
-PROTECTED_BY_DEFAULT = sorted(set(ANIMATED_INDICES) | {
-    i for i, material in enumerate(DEFAULT_MATERIALS) if material == MATERIAL["WORM"]
-})
+# Only worm indices are protected: changing them breaks worm damage/custom
+# colors. Animated indices are NOT protected — colorAnim is mod-configurable.
+PROTECTED_BY_DEFAULT = sorted(
+    i for i, material in enumerate(DEFAULT_MATERIALS) if material == MATERIAL["WORM"])
 
 if len(DEFAULT_MATERIALS) != 256:
     raise RuntimeError(f"DEFAULT_MATERIALS must have 256 entries, got {len(DEFAULT_MATERIALS)}")
