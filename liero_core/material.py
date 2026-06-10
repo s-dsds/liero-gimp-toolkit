@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass
-from .defaults import MATERIAL, MATERIAL_NAMES, DEFAULT_MATERIALS, DEFAULT_COLOR_ANIM, PREFERRED_REPLACEMENT_INDICES, PROTECTED_BY_DEFAULT
+from .defaults import MATERIAL, MATERIAL_NAMES, DEFAULT_MATERIALS, ANIMATED_INDICES, PREFERRED_REPLACEMENT_INDICES, PROTECTED_BY_DEFAULT
 
 _NAME_RULES = [
     ("BG_SEESHADOW", ["see shadow", "seeshadow", "shadow bg", "bg shadow"]),
@@ -51,7 +51,7 @@ def index_info(index: int, material_table: list[int] | None = None) -> IndexInfo
         index=index,
         material=material,
         material_name=MATERIAL_NAMES.get(material, f"UNKNOWN_{material}"),
-        animated=index in DEFAULT_COLOR_ANIM,
+        animated=index in ANIMATED_INDICES,
         protected=index in PROTECTED_BY_DEFAULT,
         preferred_replacement_candidate=index in PREFERRED_REPLACEMENT_INDICES,
     )

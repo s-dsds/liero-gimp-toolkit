@@ -10,9 +10,9 @@ This package contains specs and first-iteration code for three related projects:
 
 - `UNDEF` is **not** treated as unused. It is a valid shoot-through material.
 - Indices `188-235` are treated as **preferred replacement candidates**, not automatically unused.
-- `defaultColorAnim = [129,132,133,136,152,159,168,171]` is an independent animation flag, not a material.
+- `colorAnim = [129,131,133,136,152,159,168,171]` is a flat list of `(from, to)` **range pairs** (4 ranges, 19 animated indices), independent of materials. Confirmed against LIERO.EXE 1.33 (offset 0x1AF0C) and WebLiero's classic `mod.json`; the earlier `132` was a transcription error.
 - Worm and animated indices are protected by default.
-- Classic Liero material semantics are hardcoded for the default workflow.
+- Classic Liero material semantics are hardcoded for the default workflow. The material table is verified against LIERO.EXE 1.33 and wgetch's WebLiero material reference (which agree byte-for-byte); the originally transcribed table had two blocks (160-171, 176-184) shifted by 4.
 
 ## Contents
 
@@ -39,7 +39,22 @@ tests/test_core.py
 
 ## Status
 
-The core Python modules are usable outside GIMP and include a small test suite. The GIMP scripts are **first-iteration GIMP 3 plug-in drafts**. They define the architecture and menu targets, but the more sensitive pieces—native GIMP file dialogs, live preview plumbing, and pixel extraction from layer groups—should be finished while testing inside your exact GIMP 3.2 Python GI environment.
+- **Palette management: functional.** Import (any source below), export by material, validate, plus the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
+- **Palette Lab: draft shell.** Transform helpers exist; the preview UI is next.
+- **Material quantizer: draft shell.** The core quantizer is tested; GIMP pixel extraction is next.
+
+### Supported palette sources
+
+| Source | Notes |
+|---|---|
+| `.gpl` | GIMP palette |
+| indexed `.png` | via Pillow on the CLI, via GIMP itself in the plug-in |
+| `.lpl` | raw 768-byte RGB (LieroKit/wledit); 6-bit dumps auto-detected |
+| `.wlsprt` | WebLiero sprite file (default palette when none embedded) |
+| `.lev` | POWERLEVEL variant; plain levels fall back to the default palette |
+| `LIERO.EXE` | decompressed 1.33 exe: palette @132774, materials @0x1C2E0, colorAnim @0x1AF0C (offsets from OpenLiero's tc_tool) |
+
+The CLI can also write `.lpl` files and patch a palette **into** a `.wlsprt` or `.lev` (turning it into a POWERLEVEL).
 
 GIMP 3's Python plug-in API maps to the C API through GObject Introspection, and GIMP's current docs recommend Python 3 as one of the main cross-platform plug-in languages. GIMP 3 images expose palette/colormap APIs for indexed images, and `Gimp.Image.set_palette()` changes the colormap of indexed images. GIMP 3 also has drawable filters for GEGL operations, although this toolkit is broader than a single GEGL filter.
 
@@ -49,8 +64,10 @@ GIMP 3's Python plug-in API maps to the C API through GObject Introspection, and
 cd liero-gimp-toolkit
 uv venv .venv && uv pip install --python .venv/bin/python pytest pillow
 .venv/bin/python -m pytest tests
-.venv/bin/python liero_palette_cli.py validate some_palette.gpl
-.venv/bin/python liero_palette_cli.py split some_palette.gpl out_palettes
+.venv/bin/python liero_palette_cli.py validate sprites.wlsprt
+.venv/bin/python liero_palette_cli.py split LIERO.EXE out_palettes
+.venv/bin/python liero_palette_cli.py convert sprites.wlsprt palette.gpl
+.venv/bin/python liero_palette_cli.py apply new_palette.gpl map.lev -o powermap.lev
 ```
 
 (Pillow is only needed for indexed PNG palette import.)
@@ -77,9 +94,8 @@ grep -ao 'python-fu-liero[a-z-]*' ~/.config/GIMP/3.2/pluginrc | sort -u
 
 ### Palette management
 
-- Add real `GimpUi.ProcedureDialog` file/folder arguments.
-- Add command to apply an imported `.gpl` to the current indexed image via `Image.set_palette()`.
-- Add JSON validation report export.
+- JSON validation report export from the GIMP procedure (CLI already does it).
+- WebLiero Extended custom material tables (core APIs already accept a custom table; needs a sample WLE mod to pin the format).
 
 ### Palette Lab
 
