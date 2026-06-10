@@ -1,0 +1,10 @@
+{
+  "ROCK": 10,
+  "DIRT": 14,
+  "DIRT_2": 8,
+  "BG": 8,
+  "BG_DIRT": 8,
+  "BG_DIRT_2": 6,
+  "BG_SEESHADOW": 4,
+  "UNDEF": 8
+}
