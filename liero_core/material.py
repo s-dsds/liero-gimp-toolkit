@@ -153,6 +153,25 @@ def load_material_table(path) -> list[int]:
     return parse_material_text(text, str(path))
 
 
+def materials_from_entry_names(names: list[str]) -> list[int] | None:
+    """Recover a material table from GIMP palette entry names.
+
+    The toolkit names entries like ``042 ROCK``; any entry name containing a
+    known material token counts. Returns None when fewer than half the entries
+    carry one (i.e. the palette wasn't made by this toolkit).
+    """
+    token_re = re.compile(
+        r"\b(BG_SEESHADOW|BG_DIRT_2|BG_DIRT|DIRT_2|DIRT|ROCK|BG|WORM|UNDEF)\b")
+    table = [MATERIAL["UNDEF"]] * 256
+    hits = 0
+    for i, name in enumerate(names[:256]):
+        m = token_re.search(name or "")
+        if m:
+            table[i] = MATERIAL[m.group(1)]
+            hits += 1
+    return table if hits >= len(names[:256]) / 2 else None
+
+
 def material_table_to_js(table: list[int], base: list[int] | None = None) -> str:
     """Render a material table as a paste-ready WLE room-script expression.
 

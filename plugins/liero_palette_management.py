@@ -33,6 +33,7 @@ for _candidate in (PLUGIN_DIR, PLUGIN_DIR.parent):
 
 import json
 
+from liero_core.colorops import uniquify_palette
 from liero_core.palette import Palette
 from liero_core.formats import load_palette
 from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js, parse_material_text
@@ -504,9 +505,15 @@ if Gimp is not None:
                 applied = ''
                 if apply_flag:
                     if can_apply:
-                        image.set_palette(gimp_palette)
+                        # apply a uniquified copy: GIMP needs distinct colormap
+                        # entries to keep indexed pixels distinguishable
+                        unique = Palette(f"{pal.name} (applied)",
+                                         uniquify_palette(pal.colors[:256]))
+                        tmp_palette = make_gimp_palette(unique, table)
+                        image.set_palette(tmp_palette)
+                        tmp_palette.delete()
                         Gimp.displays_flush()
-                        applied = ' and applied it to the image colormap'
+                        applied = ' and applied it (colors made unique) to the image colormap'
                     else:
                         applied = ' (NOT applied: active image is not in indexed mode)'
                 Gimp.message(f"Imported palette '{pal.name}' ({len(pal.colors)} colors){applied}.")
