@@ -56,6 +56,14 @@ tests/test_core.py
 
 The CLI can also write `.lpl` files and patch a palette **into** a `.wlsprt` or `.lev` (turning it into a POWERLEVEL).
 
+### WebLiero Extended custom material tables
+
+WLE rooms set custom materials per map via `WLROOM.setMaterials(<256-int array>)` in the room script (`mapsettings.js` style). The toolkit supports this everywhere a material table matters:
+
+- `validate`/`split` (CLI) and Export by Material / Validate (GIMP) take an optional materials file: either a JSON array or any JS-ish text containing the array (you can point it straight at a room-script file).
+- `materials` (CLI) converts a table to JSON, or with `--js` emits a paste-ready room-script expression (`defaultMaterials.map(noUndef).map(replaceMatIndexBy(MATERIAL.ROCK,...))`), falling back to a plain array literal when the table is too different.
+- With a custom table, protected indices follow **that table's** worm indices.
+
 GIMP 3's Python plug-in API maps to the C API through GObject Introspection, and GIMP's current docs recommend Python 3 as one of the main cross-platform plug-in languages. GIMP 3 images expose palette/colormap APIs for indexed images, and `Gimp.Image.set_palette()` changes the colormap of indexed images. GIMP 3 also has drawable filters for GEGL operations, although this toolkit is broader than a single GEGL filter.
 
 ## Try the core without GIMP
@@ -95,7 +103,6 @@ grep -ao 'python-fu-liero[a-z-]*' ~/.config/GIMP/3.2/pluginrc | sort -u
 ### Palette management
 
 - JSON validation report export from the GIMP procedure (CLI already does it).
-- WebLiero Extended custom material tables (core APIs already accept a custom table; needs a sample WLE mod to pin the format).
 
 ### Palette Lab
 

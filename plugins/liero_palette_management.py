@@ -32,7 +32,7 @@ for _candidate in (PLUGIN_DIR, PLUGIN_DIR.parent):
 
 from liero_core.palette import Palette
 from liero_core.formats import load_palette
-from liero_core.material import index_info, indices_for_material
+from liero_core.material import index_info, indices_for_material, load_material_table
 from liero_core.defaults import MATERIAL
 
 PROC_IMPORT = 'python-fu-liero-palette-import'
@@ -74,13 +74,13 @@ def make_gimp_palette(pal: Palette):
     return gimp_palette
 
 
-def export_material_palettes(pal: Palette, output_dir: Path):
+def export_material_palettes(pal: Palette, output_dir: Path, table=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
     pal.to_gpl(output_dir / f"{pal.name}-full.gpl")
     written.append(f"{pal.name}-full.gpl")
     for mat_name, mat_value in MATERIAL.items():
-        idxs = indices_for_material(mat_value)
+        idxs = indices_for_material(mat_value, table)
         colors = [pal.colors[i] for i in idxs]
         out = output_dir / f"{pal.name}-{mat_name}.gpl"
         Palette(f"{pal.name}-{mat_name}", colors).to_gpl(out)
@@ -88,16 +88,18 @@ def export_material_palettes(pal: Palette, output_dir: Path):
     return written
 
 
-def validation_report(pal: Palette) -> str:
+def validation_report(pal: Palette, table=None) -> str:
     dupes = pal.unique_report()
     lines = [f"Palette: {pal.name}"]
+    if table is not None:
+        lines.append("Using custom WLE material table.")
     counts = {}
     for i in range(256):
-        counts.setdefault(index_info(i).material_name, []).append(i)
+        counts.setdefault(index_info(i, table).material_name, []).append(i)
     lines.append("Material slots: " + ", ".join(
         f"{name}={len(idxs)}" for name, idxs in sorted(counts.items())))
-    protected = [i for i in range(256) if index_info(i).protected]
-    animated = [i for i in range(256) if index_info(i).animated]
+    protected = [i for i in range(256) if index_info(i, table).protected]
+    animated = [i for i in range(256) if index_info(i, table).animated]
     lines.append(f"Protected indices: {len(protected)} (worm + animated)")
     lines.append(f"Animated indices: {animated}")
     if dupes:
@@ -153,13 +155,22 @@ if Gimp is not None:
                                        'Folder receiving the .gpl files',
                                        Gimp.FileChooserAction.SELECT_FOLDER, False, None,
                                        GObject.ParamFlags.READWRITE)
+                proc.add_file_argument('materials-file', '_Materials table (optional)',
+                                       'Custom WLE material table (JSON or JS array file)',
+                                       Gimp.FileChooserAction.OPEN, True, None,
+                                       GObject.ParamFlags.READWRITE)
             else:
                 proc = Gimp.ImageProcedure.new(self, name, Gimp.PDBProcType.PLUGIN, self.run_validate, None)
-                proc.set_menu_label('Validate Image Palette')
+                proc.set_menu_label('Validate Image Palette...')
                 proc.set_documentation(
                     'Report on the active image colormap using classic Liero material semantics.',
-                    'Shows material slot counts, protected/animated indices and duplicate colors.',
+                    'Shows material slot counts, protected/animated indices and duplicate colors. '
+                    'A custom WLE material table can replace the classic one.',
                     name)
+                proc.add_file_argument('materials-file', '_Materials table (optional)',
+                                       'Custom WLE material table (JSON or JS array file)',
+                                       Gimp.FileChooserAction.OPEN, True, None,
+                                       GObject.ParamFlags.READWRITE)
             proc.set_image_types('*')
             if name == PROC_VALIDATE:
                 proc.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
@@ -186,6 +197,13 @@ if Gimp is not None:
             return procedure.new_return_values(
                 Gimp.PDBStatusType.EXECUTION_ERROR,
                 GLib.Error(message))
+
+        @staticmethod
+        def _materials_table(config):
+            gfile = config.get_property('materials-file')
+            if gfile is None:
+                return None
+            return load_material_table(Path(gfile.get_path()))
 
         # --- procedures ------------------------------------------------------
 
@@ -235,7 +253,8 @@ if Gimp is not None:
                     return self._error(
                         procedure,
                         'Choose a palette file, or run on an indexed image to use its colormap.')
-                written = export_material_palettes(pal, Path(outdir.get_path()))
+                written = export_material_palettes(pal, Path(outdir.get_path()),
+                                                   table=self._materials_table(config))
                 Gimp.message(f"Wrote {len(written)} palettes to {outdir.get_path()}:\n" + "\n".join(written))
                 return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
             except Exception as exc:
@@ -246,9 +265,12 @@ if Gimp is not None:
             try:
                 if image is None or image.get_base_type() != Gimp.ImageBaseType.INDEXED:
                     return self._error(procedure, 'Validate needs an indexed image (Image > Mode > Indexed).')
+                if run_mode == Gimp.RunMode.INTERACTIVE:
+                    if not self._dialog(procedure, config, 'Validate Liero Image Palette'):
+                        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
                 pal = palette_from_gimp_palette(image.get_palette(),
                                                 name=Path(image.get_name() or 'image').stem)
-                Gimp.message(validation_report(pal))
+                Gimp.message(validation_report(pal, table=self._materials_table(config)))
                 return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
             except Exception as exc:
                 traceback.print_exc()
