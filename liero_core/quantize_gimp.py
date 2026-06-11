@@ -146,14 +146,93 @@ gi.require_version('GimpUi', '3.0')
 gi.require_version('Gtk', '3.0')
 from gi.repository import GimpUi, Gtk  # noqa: E402
 
+import json  # noqa: E402
+
 from .defaults import ANIMATED_INDICES  # noqa: E402
 from .formats import default_palette  # noqa: E402
 from .gimp_colors import make_gimp_palette, rgb8_from_color  # noqa: E402
 from .material import materials_from_entry_names, animated_from_entry_names  # noqa: E402
 from .palette_grid import PaletteGrid  # noqa: E402
+from .quantizer import find_isolated_pixels  # noqa: E402
 
 DEFAULT_COUNT = 8
 SKIP = '__skip__'
+PARASITE_NAME = 'liero-quantize-settings'
+
+# flat colors for the material-mask preview mode
+MATERIAL_MASK_COLORS = {
+    MATERIAL['UNDEF']: (20, 20, 20),
+    MATERIAL['DIRT']: (139, 69, 19),
+    MATERIAL['DIRT_2']: (205, 133, 63),
+    MATERIAL['ROCK']: (128, 128, 128),
+    MATERIAL['BG']: (30, 60, 200),
+    MATERIAL['BG_DIRT']: (0, 150, 150),
+    MATERIAL['BG_DIRT_2']: (100, 200, 200),
+    MATERIAL['BG_SEESHADOW']: (128, 0, 160),
+    MATERIAL['WORM']: (0, 220, 0),
+}
+BAD_PIXEL_COLOR = (255, 0, 255)
+FILTERED_OUT_COLOR = (35, 35, 35)
+
+
+def leaf_drawables(layer):
+    """All non-group drawables under a layer (the layer itself if plain)."""
+    if hasattr(layer, 'get_children'):
+        try:
+            children = layer.get_children()
+        except Exception:
+            children = None
+        if children:
+            out = []
+            for child in children:
+                out.extend(leaf_drawables(child))
+            return out
+    return [layer]
+
+
+def palette_hex_string(colors):
+    return ';'.join('#%02x%02x%02x' % tuple(c) for c in colors)
+
+
+def apply_palette_to_drawable(drawable, allowed_colors):
+    """Quantize one drawable in place to the given colors.
+
+    Uses the sibling C plug-in's GEGL op (custom:palette-quantize) when
+    available — proper metrics, honors alpha; falls back to a pure-python
+    nearest-color remap otherwise.
+    """
+    try:
+        flt = Gimp.DrawableFilter.new(drawable, 'custom:palette-quantize',
+                                      'liero material quantize')
+        cfg = flt.get_config()
+        cfg.set_property('palette', palette_hex_string(allowed_colors))
+        flt.update()
+        drawable.merge_filter(flt)
+        return 'gegl'
+    except Exception:
+        pass
+    # fallback: nearest-color remap, alpha preserved
+    w, h = drawable.get_width(), drawable.get_height()
+    rect = Gegl.Rectangle.new(0, 0, w, h)
+    buf = drawable.get_buffer()
+    data = bytearray(buf.get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP))
+    lut = {}
+    for p in range(w * h):
+        o = p * 4
+        if data[o + 3] < ALPHA_THRESHOLD:
+            continue
+        color = (data[o], data[o + 1], data[o + 2])
+        new = lut.get(color)
+        if new is None:
+            new = min(allowed_colors,
+                      key=lambda c: (c[0] - color[0]) ** 2
+                      + (c[1] - color[1]) ** 2 + (c[2] - color[2]) ** 2)
+            lut[color] = new
+        data[o], data[o + 1], data[o + 2] = new
+    buf.set(rect, "R'G'B'A u8", bytes(data))
+    buf.flush()
+    drawable.update(0, 0, w, h)
+    return 'python'
 
 
 class QuantizeDialog:
@@ -234,6 +313,16 @@ class QuantizeDialog:
         quant_btn.connect('clicked', self._on_quantize)
         left.pack_start(quant_btn, False, False, 0)
 
+        self.apply_btn = Gtk.Button(label='Apply to layers (edits this image)')
+        self.apply_btn.set_tooltip_text(
+            'Quantize each assigned layer/group IN PLACE to its material '
+            'colors (via the palette-quantize GEGL op when installed) - the '
+            'XCF stays RGB and editable, but palette-correct, so exporting '
+            'later is just File > Export')
+        self.apply_btn.set_sensitive(False)
+        self.apply_btn.connect('clicked', self._on_apply_layers)
+        left.pack_start(self.apply_btn, False, False, 0)
+
         self.stats = Gtk.Label(xalign=0)
         self.stats.set_line_wrap(True)
         self.stats.set_size_request(320, -1)
@@ -258,7 +347,25 @@ class QuantizeDialog:
         self.canvas.vadj = pscroll.get_vadjustment()
         right.pack_start(pscroll, True, True, 0)
 
+        view_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        view_row.pack_start(Gtk.Label(label='View:', xalign=0), False, False, 0)
+        self.view_combo = Gtk.ComboBoxText()
+        for vid, label in (('colors', 'Quantized colors'),
+                           ('mask', 'Material mask'),
+                           ('bad', 'Bad pixels (isolated material)')):
+            self.view_combo.append(vid, label)
+        self.view_combo.set_active_id('colors')
+        self.view_combo.connect('changed', lambda _c: self._render_plan_preview())
+        view_row.pack_start(self.view_combo, True, True, 0)
+        self.filter_combo = Gtk.ComboBoxText()
+        self.filter_combo.append('all', 'All materials')
+        self.filter_combo.set_active_id('all')
+        self.filter_combo.connect('changed', lambda _c: self._render_plan_preview())
+        view_row.pack_start(self.filter_combo, True, True, 0)
+        right.pack_start(view_row, False, False, 0)
+
         self._rebuild_counts()
+        self._restore_settings()
 
     # ---- ui state -----------------------------------------------------------
 
@@ -332,10 +439,140 @@ class QuantizeDialog:
         self.grid.queue_draw()
         self.canvas.set_pixels(self.plan['width'], self.plan['height'],
                                self.plan['indices'])
-        self.canvas.render(self.plan['palette'])
+        self._bad = find_isolated_pixels(self.plan['indices'], self.plan['width'],
+                                         self.plan['height'], self.plan['table'])
+        # material filter options follow the plan
+        current = self.filter_combo.get_active_id()
+        self.filter_combo.remove_all()
+        self.filter_combo.append('all', 'All materials')
+        for material in sorted(self.plan['assignments']):
+            self.filter_combo.append(str(material),
+                                     MATERIAL_NAMES.get(material, str(material)))
+        self.filter_combo.set_active_id(
+            current if current in {str(m) for m in self.plan['assignments']} else 'all')
+        self._render_plan_preview()
         self.stats.set_text("\n".join(self.plan['stats'])
-                            + f"\nAllocated slots are selected on the grid.")
+                            + f"\nBad pixels (isolated material): {len(self._bad)}"
+                            + "\nAllocated slots are selected on the grid.")
         self.create_btn.set_sensitive(True)
+        self.apply_btn.set_sensitive(True)
+        self._save_settings()
+
+    def _render_plan_preview(self):
+        if self.plan is None:
+            return
+        mode = self.view_combo.get_active_id() or 'colors'
+        filt = self.filter_combo.get_active_id() or 'all'
+        table = self.plan['table']
+        if mode == 'mask':
+            lut = [MATERIAL_MASK_COLORS.get(table[i], (255, 255, 0))
+                   for i in range(256)]
+        else:
+            lut = list(self.plan['palette'])
+        if mode == 'bad':
+            lut = [(r // 3, g // 3, b // 3) for r, g, b in lut]  # dim base
+        if filt != 'all':
+            material = int(filt)
+            lut = [c if table[i] == material else FILTERED_OUT_COLOR
+                   for i, c in enumerate(lut)]
+        if mode != 'bad':
+            self.canvas.render(lut)
+            return
+        # bad-pixel mode: positional overlay needs prebuilt RGB
+        width, height = self.plan['width'], self.plan['height']
+        indices = self.plan['indices']
+        tables = [bytes(lut[i][ch] for i in range(256)) for ch in range(3)]
+        rgb = bytearray(width * height * 3)
+        rgb[0::3] = indices.translate(tables[0])
+        rgb[1::3] = indices.translate(tables[1])
+        rgb[2::3] = indices.translate(tables[2])
+        for x, y in self._bad:
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    xx, yy = x + dx, y + dy
+                    if 0 <= xx < width and 0 <= yy < height:
+                        o = (yy * width + xx) * 3
+                        rgb[o:o + 3] = bytes(BAD_PIXEL_COLOR)
+        self.canvas.render_rgb(bytes(rgb))
+
+    def _on_apply_layers(self, _btn):
+        if self.plan is None:
+            return
+        palette = self.plan['palette']
+        self.image.undo_group_start()
+        used_gegl = used_python = 0
+        try:
+            for layer, material in self._assignments():
+                allowed = self.plan['assignments'].get(material)
+                if not allowed:
+                    continue
+                colors = [palette[i] for i in allowed]
+                for leaf in leaf_drawables(layer):
+                    how = apply_palette_to_drawable(leaf, colors)
+                    if how == 'gegl':
+                        used_gegl += 1
+                    else:
+                        used_python += 1
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.stats.set_text(f"Apply failed: {exc}")
+            return
+        finally:
+            self.image.undo_group_end()
+            Gimp.displays_flush()
+        via = []
+        if used_gegl:
+            via.append(f"{used_gegl} via palette-quantize op")
+        if used_python:
+            via.append(f"{used_python} via python remap")
+        self.stats.set_text(
+            f"Applied material palettes to layers ({', '.join(via)}).\n"
+            "The image stays RGB and editable - one undo step reverts all.")
+
+    # ---- settings persistence (parasite, survives in the XCF) -----------------
+
+    def _save_settings(self):
+        data = {
+            'layers': {layer.get_name() or '': combo.get_active_id()
+                       for layer, combo in self.layer_rows},
+            'counts': {str(m): int(s.get_value())
+                       for m, s in self.count_spins.items()},
+            'palette': self.palette_combo.get_active_id(),
+            'protect_worm': self.protect_worm.get_active(),
+            'unique': self.unique_check.get_active(),
+            'name': self.name_entry.get_text(),
+        }
+        try:
+            parasite = Gimp.Parasite.new(PARASITE_NAME, 1,  # 1 = persistent
+                                         json.dumps(data).encode())
+            self.image.attach_parasite(parasite)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    def _restore_settings(self):
+        try:
+            parasite = self.image.get_parasite(PARASITE_NAME)
+            if parasite is None:
+                return
+            data = json.loads(bytes(parasite.get_data()).decode())
+        except Exception:
+            return
+        for layer, combo in self.layer_rows:
+            saved = data.get('layers', {}).get(layer.get_name() or '')
+            if saved:
+                combo.set_active_id(saved)
+        self._rebuild_counts()
+        for key, spin in self.count_spins.items():
+            if str(key) in data.get('counts', {}):
+                spin.set_value(data['counts'][str(key)])
+        if data.get('palette') and not self.palette_combo.set_active_id(data['palette']):
+            self.palette_combo.set_active_id('__default__')
+        self.protect_worm.set_active(data.get('protect_worm', True))
+        self.unique_check.set_active(data.get('unique', True))
+        if data.get('name'):
+            self.name_entry.set_text(data['name'])
 
     def run(self):
         self.dialog.show_all()

@@ -57,6 +57,28 @@ def test_plan_multiple_materials_no_slot_clash():
         assert table[i] == MATERIAL['ROCK']
 
 
+def test_find_isolated_pixels():
+    from liero_core.quantizer import find_isolated_pixels
+    # 8x4 canvas: rock indices everywhere (19), one BG index (130) at (3,1),
+    # and a 2x1 BG pair at (6,2)-(7,2) which is NOT isolated
+    W, H = 8, 4
+    idx = bytearray([19] * (W * H))
+    idx[1 * W + 3] = 130
+    idx[2 * W + 6] = 130
+    idx[2 * W + 7] = 130
+    bad = find_isolated_pixels(bytes(idx), W, H)
+    assert bad == [(3, 1)]
+
+
+def test_find_isolated_pixels_same_material_different_index():
+    from liero_core.quantizer import find_isolated_pixels
+    # two different ROCK indices touching: same material, not isolated
+    W, H = 3, 1
+    rocks = indices_for_material(MATERIAL['ROCK'])
+    idx = bytes([rocks[0], rocks[1], rocks[0]])
+    assert find_isolated_pixels(idx, W, H) == []
+
+
 def test_build_remap_lut():
     base = default_palette().colors
     palette, table, assignments = plan_quantization(

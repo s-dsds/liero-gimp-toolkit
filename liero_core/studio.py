@@ -188,6 +188,15 @@ class PreviewCanvas:
             self.width, self.height, self.width * 3)
         self.widget.queue_draw()
 
+    def render_rgb(self, rgb: bytes):
+        """Show prebuilt RGB bytes (3 bytes/pixel) instead of LUT colors."""
+        if not self.width:
+            return
+        self._pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+            GLib.Bytes.new(bytes(rgb)), GdkPixbuf.Colorspace.RGB, False, 8,
+            self.width, self.height, self.width * 3)
+        self.widget.queue_draw()
+
     def _on_draw(self, widget, cr):
         if self._pixbuf is None:
             return False
