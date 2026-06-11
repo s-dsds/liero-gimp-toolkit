@@ -126,3 +126,11 @@ on Linux). Read this before touching the GIMP-side code.
   palette resource keeps the raw colors.
 - GIMP palettes carry materials in entry names (`042 ROCK`); 
   `materials_from_entry_names` restores the table (≥50% hit rate required).
+
+- **`Gegl.list_operations()` segfaults inside plug-in processes** — never
+  call it. To use a GEGL op, just try `Gimp.DrawableFilter.new(drawable,
+  'op-name', ...)` + `get_config().set_property(...)` + `merge_filter()`
+  and fall back on exception. The sibling `custom:palette-quantize` op works
+  this way (palette property = "#rrggbb;#rrggbb;...").
+- Image parasites persist settings into the XCF: `Gimp.Parasite.new(name, 1,
+  json_bytes)` + `image.attach_parasite()`; flag 1 = persistent.
