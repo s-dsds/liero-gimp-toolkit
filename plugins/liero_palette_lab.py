@@ -99,7 +99,8 @@ def indices_from_image(image):
     bpp = len(data) // (w * h)
     if bpp > 1:  # indexed+alpha safety: keep the index plane
         data = data[::bpp]
-    return subsample_indices(w, h, data, PREVIEW_W, PREVIEW_H)
+    # keep full resolution so zoom shows real pixels; only clamp absurd sizes
+    return subsample_indices(w, h, data, 2048, 2048)
 
 
 if Gimp is not None:

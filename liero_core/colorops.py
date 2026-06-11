@@ -102,6 +102,31 @@ def gradient_palette_f(colors: Sequence[FColor], indices: Iterable[int],
     return out
 
 
+def similar_color_indices(colors: Sequence[Color], target: Color,
+                          hue_tol: float = 35 / 360.0, sat_floor: float = 0.15,
+                          light_tol: float = 0.20) -> set:
+    """Indices whose color belongs to the same family as ``target``.
+
+    A saturated target selects all colors of a close hue (e.g. "all the
+    blues", whatever their lightness — a gradient/ramp counts as one family).
+    A gray target selects grays of similar lightness.
+    """
+    tr, tg, tb = [v / 255.0 for v in target]
+    th, tl, ts = colorsys.rgb_to_hls(tr, tg, tb)
+    out = set()
+    for i, (r, g, b) in enumerate(colors):
+        h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+        if ts >= sat_floor:
+            hue_diff = abs(h - th)
+            hue_diff = min(hue_diff, 1.0 - hue_diff)
+            if s >= sat_floor and hue_diff <= hue_tol:
+                out.add(i)
+        else:
+            if s < sat_floor and abs(l - tl) <= light_tol:
+                out.add(i)
+    return out
+
+
 def uniquify_palette(colors: Sequence[Color]) -> List[Color]:
     """Make every RGB value unique by minimally nudging duplicates.
 

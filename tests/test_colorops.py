@@ -9,6 +9,7 @@ from liero_core.colorops import (
     clamp8,
     gradient_palette_f,
     quantize,
+    similar_color_indices,
     to_float,
     uniquify_palette,
 )
@@ -86,6 +87,30 @@ def test_gradient_palette():
 def test_gradient_needs_three():
     colors = to_float([(0, 0, 0), (10, 10, 10)])
     assert gradient_palette_f(colors, [0, 1]) == colors
+
+
+def test_similar_colors_hue_family():
+    colors = [
+        (40, 40, 200),    # 0 dark blue
+        (120, 120, 255),  # 1 light blue (same hue family)
+        (200, 40, 40),    # 2 red
+        (128, 128, 128),  # 3 gray
+        (60, 60, 90),     # 4 dull blue (still bluish)
+    ]
+    sel = similar_color_indices(colors, (40, 40, 200))
+    assert 0 in sel and 1 in sel and 4 in sel
+    assert 2 not in sel and 3 not in sel
+
+
+def test_similar_colors_grays():
+    colors = [
+        (128, 128, 128),  # 0 mid gray
+        (150, 150, 150),  # 1 close gray
+        (20, 20, 20),     # 2 near-black (lightness too far)
+        (128, 128, 255),  # 3 saturated blue
+    ]
+    sel = similar_color_indices(colors, (128, 128, 128))
+    assert sel == {0, 1}
 
 
 def test_uniquify_palette():

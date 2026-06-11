@@ -13,7 +13,8 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk  # noqa: E402
 
-from .defaults import MATERIAL, ANIMATED_INDICES  # noqa: E402
+from .defaults import MATERIAL, MATERIAL_NAMES, ANIMATED_INDICES  # noqa: E402
+from .colorops import similar_color_indices  # noqa: E402
 
 CELL = 30  # swatch size in px
 
@@ -104,6 +105,9 @@ class PaletteGrid:
 
     def _on_press(self, widget, event):
         idx = self._event_index(event)
+        if event.button == 3:
+            self._show_context_menu(idx, event)
+            return True
         if event.type == Gdk.EventType._2BUTTON_PRESS:
             if self._edit_cb:
                 self._edit_cb(idx)
@@ -124,3 +128,39 @@ class PaletteGrid:
         if self._hover_cb:
             self._hover_cb(self._event_index(event))
         return False
+
+    # -- context menu (right click) ---------------------------------------------
+
+    def _apply_menu_selection(self, indices, idx, add=False):
+        if add:
+            self.selected.update(indices)
+        else:
+            self.selected = set(indices)
+        self.last_click = idx
+        if self._select_cb:
+            self._select_cb(idx)
+        self.queue_draw()
+
+    def _show_context_menu(self, idx, event):
+        material = self.table[idx]
+        mat_name = MATERIAL_NAMES.get(material, str(material))
+        similar = similar_color_indices(self.colors, self.colors[idx])
+        menu = Gtk.Menu()
+        items = [
+            (f"Select similar colors ({len(similar)})",
+             lambda *_: self._apply_menu_selection(similar, idx)),
+            (f"Add similar colors to selection",
+             lambda *_: self._apply_menu_selection(similar, idx, add=True)),
+            (f"Select material {mat_name}",
+             lambda *_: self._apply_menu_selection(
+                 {i for i, m in enumerate(self.table) if m == material}, idx)),
+            (f"Select animated indices",
+             lambda *_: self._apply_menu_selection(set(self.animated), idx)),
+        ]
+        for label, handler in items:
+            item = Gtk.MenuItem(label=label)
+            item.connect('activate', handler)
+            menu.append(item)
+        menu.show_all()
+        self._menu = menu  # keep a reference while shown
+        menu.popup_at_pointer(event)
