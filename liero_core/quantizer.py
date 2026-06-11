@@ -144,3 +144,41 @@ def build_remap_lut(pixels: Iterable[Color], palette: Sequence[Color],
         if color not in lut:
             lut[color] = nearest_color_index(color, palette, allowed_indices)
     return lut
+
+
+def find_isolated_pixels(indices: bytes, width: int, height: int,
+                         material_table: list[int] | None = None,
+                         limit: int = 20000) -> list[tuple[int, int]]:
+    """Positions whose material differs from ALL 8 neighbors.
+
+    The classic "single BG pixel lost in the middle of rock" detector: such
+    pixels are invisible in the art but change game behavior. Border pixels
+    only consider existing neighbors.
+    """
+    table = material_table or DEFAULT_MATERIALS
+    mats = bytes(table[i] for i in indices)
+    bad = []
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            m = mats[row + x]
+            isolated = True
+            for dy in (-1, 0, 1):
+                yy = y + dy
+                if not 0 <= yy < height:
+                    continue
+                base = yy * width
+                for dx in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    xx = x + dx
+                    if 0 <= xx < width and mats[base + xx] == m:
+                        isolated = False
+                        break
+                if not isolated:
+                    break
+            if isolated:
+                bad.append((x, y))
+                if len(bad) >= limit:
+                    return bad
+    return bad
