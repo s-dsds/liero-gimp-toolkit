@@ -27,7 +27,9 @@ from .colorops import (adjusted_palette_f, gradient_palette_f, quantize,  # noqa
 from .defaults import (MATERIAL, MATERIAL_GROUPS, DEFAULT_MATERIALS,  # noqa: E402
                        ANIMATED_INDICES, expand_color_anim)
 from .formats import (load_palette, read_exe_color_anim, read_lev_pixels,  # noqa: E402
-                      wlsprt_sheet)
+                      wlsprt_sheet, write_lpl, write_wlsprt_palette,
+                      write_lev_palette, write_exe_palette)
+from .palette import write_gpl  # noqa: E402
 from .gimp_colors import color_from_rgb8, rgb8_from_color, make_gimp_palette  # noqa: E402
 from .material import (index_info, materials_from_entry_names,  # noqa: E402
                        animated_from_entry_names, indices_to_anim_pairs,
@@ -323,6 +325,12 @@ class PaletteStudioDialog:
             'Nudge duplicate RGB values minimally so GIMP can tell colormap '
             'entries apart (saved palettes always keep the raw colors)')
         left.pack_start(self.unique_check, False, False, 0)
+        write_btn = Gtk.Button(label='Write palette file…')
+        write_btn.set_tooltip_text(
+            'Export .gpl/.lpl, or patch the palette into an existing '
+            '.wlsprt / .lev / LIERO.EXE (sprites and code untouched)')
+        write_btn.connect('clicked', self._on_write_file)
+        left.pack_start(write_btn, False, False, 0)
 
         # ---- middle: controls ------------------------------------------------
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -454,9 +462,14 @@ class PaletteStudioDialog:
         apply_text = Gtk.Button(label='Apply text to grid')
         apply_text.connect('clicked', self._on_apply_text)
         text_btns.pack_start(apply_text, False, False, 0)
-        refresh_text = Gtk.Button(label='Refresh from grid')
-        refresh_text.connect('clicked', lambda _b: self._refresh_text())
-        text_btns.pack_start(refresh_text, False, False, 0)
+        self._text_format = 'expr'
+        refresh_expr = Gtk.Button(label='Refresh (room-script)')
+        refresh_expr.connect('clicked', lambda _b: self._set_text_format('expr'))
+        text_btns.pack_start(refresh_expr, False, False, 0)
+        refresh_array = Gtk.Button(label='Refresh (plain array)')
+        refresh_array.set_tooltip_text('Plain JSON array — for use outside WLE rooms')
+        refresh_array.connect('clicked', lambda _b: self._set_text_format('array'))
+        text_btns.pack_start(refresh_array, False, False, 0)
         text_row.pack_start(text_btns, False, False, 0)
 
         self.dialog.set_default_size(1500, 900)
@@ -779,9 +792,16 @@ class PaletteStudioDialog:
 
     # ---- material text field -------------------------------------------------------
 
+    def _set_text_format(self, fmt):
+        self._text_format = fmt
+        self._refresh_text()
+
     def _refresh_text(self):
-        self.text_view.get_buffer().set_text(
-            "materials: " + material_table_to_js(self.table) + ",")
+        if getattr(self, '_text_format', 'expr') == 'array':
+            text = json.dumps(self.table)
+        else:
+            text = "materials: " + material_table_to_js(self.table) + ","
+        self.text_view.get_buffer().set_text(text)
 
     def _on_apply_text(self, _btn):
         buf = self.text_view.get_buffer()
@@ -793,6 +813,63 @@ class PaletteStudioDialog:
             return
         self.grid.table = list(self.table)
         self._recompute()
+
+    def _entry_names(self):
+        return [f"{i:03d} {index_info(i, self.table).material_name}"
+                + (' ANIM' if i in self.animated else '') for i in range(256)]
+
+    def _write_palette_file(self, path: Path):
+        pal = Palette(self._palette_name(), quantize(self.preview))
+        suffix = path.suffix.lower()
+        if suffix == '.gpl':
+            write_gpl(path, pal.name, pal.colors, names=self._entry_names())
+        elif suffix == '.lpl':
+            write_lpl(path, pal)
+        elif suffix in ('.wlsprt', '.lev') or suffix == '.exe' \
+                or path.name.upper() == 'LIERO.EXE':
+            if not path.exists():
+                raise ValueError(f"{path.name} must be an existing file - the "
+                                 "palette is patched in, the rest is kept")
+            if suffix == '.wlsprt':
+                write_wlsprt_palette(path, pal)
+            elif suffix == '.lev':
+                write_lev_palette(path, pal)
+            else:
+                write_exe_palette(path, pal)
+        else:
+            raise ValueError(f"Unsupported target (use .gpl/.lpl or an existing "
+                             f".wlsprt/.lev/LIERO.EXE): {path.name}")
+        Gimp.message(f"Wrote palette to {path}")
+
+    def _on_write_file(self, _btn):
+        chooser = Gtk.FileChooserDialog(title='Write palette to file',
+                                        transient_for=self.dialog,
+                                        action=Gtk.FileChooserAction.SAVE)
+        chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
+        chooser.add_button('_Save', Gtk.ResponseType.OK)
+        chooser.set_do_overwrite_confirmation(True)
+        chooser.set_current_name(f"{self._palette_name()}.gpl")
+        for pattern, label in (('*.gpl', 'GIMP palette (*.gpl)'),
+                               ('*.lpl', 'Liero palette (*.lpl)'),
+                               ('*.wlsprt', 'Patch into WebLiero sprites (*.wlsprt)'),
+                               ('*.lev', 'Patch into level -> POWERLEVEL (*.lev)'),
+                               ('*.exe', 'Patch into LIERO.EXE (*.exe)')):
+            flt = Gtk.FileFilter()
+            flt.set_name(label)
+            flt.add_pattern(pattern)
+            flt.add_pattern(pattern.upper())
+            chooser.add_filter(flt)
+        path = None
+        if chooser.run() == Gtk.ResponseType.OK:
+            path = Path(chooser.get_filename())
+        chooser.destroy()
+        if path is None:
+            return
+        try:
+            self._write_palette_file(path)
+        except Exception as exc:
+            traceback.print_exc()
+            self.info.set_text(f"Write failed: {exc}")
 
     def _on_save_materials(self, _btn):
         chooser = Gtk.FileChooserDialog(title='Save material table',
