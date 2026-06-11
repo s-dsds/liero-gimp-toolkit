@@ -37,6 +37,23 @@ def test_wlsprt_sprites_and_sheet(tmp_path):
     assert sheet[3] == 5 and sheet[4] == 6 and sheet[5] == 7  # second sprite after 1px pad
 
 
+def test_wlsprt_sheet_skips_empty_and_solid(tmp_path):
+    def sprite(w, h, pixels):
+        return (w).to_bytes(2, "little") + (h).to_bytes(2, "little") + b"\0\0\0\0" + bytes(pixels)
+    body = (4).to_bytes(2, "little")
+    body += sprite(2, 2, [1, 2, 3, 4])          # kept
+    body += sprite(3, 3, [0] * 9)               # empty -> skipped
+    body += sprite(4, 4, [7] * 16)              # solid -> skipped
+    body += sprite(4, 2, [0, 0, 0, 0, 0, 5, 6, 0])  # cropped to 2x1
+    f = tmp_path / "s.wlsprt"
+    f.write_bytes(b"WLSPRT\x00\x00\x00" + body)
+    w, h, sheet = wlsprt_sheet(f, sheet_width=10)
+    assert sheet[0:2] == bytes([1, 2])
+    # second kept sprite cropped to [5, 6], placed after 1px pad
+    assert bytes([5, 6]) in bytes(sheet)
+    assert 7 not in sheet
+
+
 def test_materials_from_entry_names():
     names = [f"{i:03d} {'ROCK' if DEFAULT_MATERIALS[i] == 4 else 'UNDEF'}" for i in range(256)]
     table = materials_from_entry_names(names)

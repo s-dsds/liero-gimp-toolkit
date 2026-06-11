@@ -130,13 +130,64 @@ def read_wlsprt_sprites(path: str | Path, max_sprites: int | None = None):
     return sprites
 
 
+def _crop_sprite(w: int, h: int, data: bytes, background: int = 0):
+    """Crop a sprite to its non-background bounding box (None if empty)."""
+    xmin, xmax, ymin, ymax = w, -1, h, -1
+    for y in range(h):
+        row = data[y * w:(y + 1) * w]
+        for x, v in enumerate(row):
+            if v != background:
+                if x < xmin:
+                    xmin = x
+                if x > xmax:
+                    xmax = x
+                if y < ymin:
+                    ymin = y
+                ymax = y
+    if xmax < 0:
+        return None
+    cw, ch = xmax - xmin + 1, ymax - ymin + 1
+    out = bytearray(cw * ch)
+    for y in range(ch):
+        src = (ymin + y) * w + xmin
+        out[y * cw:(y + 1) * cw] = data[src:src + cw]
+    return cw, ch, bytes(out)
+
+
+def _shrink_sprite(w: int, h: int, data: bytes, max_side: int):
+    """Integer-stride nearest downscale for oversized sprites."""
+    step = max(1, (max(w, h) + max_side - 1) // max_side)
+    if step == 1:
+        return w, h, data
+    nw, nh = max(1, w // step), max(1, h // step)
+    out = bytearray(nw * nh)
+    for y in range(nh):
+        src = (y * step) * w
+        for x in range(nw):
+            out[y * nw + x] = data[src + x * step]
+    return nw, nh, bytes(out)
+
+
 def wlsprt_sheet(path: str | Path, sheet_width: int = 320,
-                 background: int = 0):
-    """Lay WLSPRT sprites out as one indexed sheet: (width, height, indices)."""
-    sprites = read_wlsprt_sprites(path)
-    if not sprites:
-        raise ValueError(f"No sprites in WLSPRT file: {path}")
+                 background: int = 0, max_side: int = 96):
+    """Lay WLSPRT sprites out as one compact indexed sheet.
+
+    Sprites are cropped to content; empty and single-color sprites (no
+    palette information) are skipped; oversized ones are downscaled.
+    Returns (width, height, indices).
+    """
     pad = 1
+    sprites = []
+    for w, h, data in read_wlsprt_sprites(path):
+        cropped = _crop_sprite(w, h, data, background)
+        if cropped is None:
+            continue
+        w, h, data = cropped
+        if len(set(data)) <= 1:
+            continue  # solid color: useless for palette preview
+        sprites.append(_shrink_sprite(w, h, data, max_side))
+    if not sprites:
+        raise ValueError(f"No drawable sprites in WLSPRT file: {path}")
     rows = []
     row, row_w, row_h = [], 0, 0
     for w, h, data in sprites:
