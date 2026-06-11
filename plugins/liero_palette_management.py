@@ -37,7 +37,7 @@ from liero_core.colorops import uniquify_palette
 from liero_core.palette import Palette
 from liero_core.formats import load_palette, read_exe_color_anim
 from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js, parse_material_text, indices_to_anim_pairs
-from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS, ANIMATED_INDICES, expand_color_anim
+from liero_core.defaults import MATERIAL, MATERIAL_GROUPS, DEFAULT_MATERIALS, ANIMATED_INDICES, expand_color_anim
 
 PROC_IMPORT = 'python-fu-liero-palette-import'
 PROC_EXPORT = 'python-fu-liero-palette-export-by-material'
@@ -158,6 +158,8 @@ if Gimp is not None:
             self.material_combo = Gtk.ComboBoxText()
             for mat_name in MATERIAL:
                 self.material_combo.append(str(MATERIAL[mat_name]), mat_name)
+            for gid, (label, _values) in MATERIAL_GROUPS.items():
+                self.material_combo.append(f"group:{gid}", label)
             self.material_combo.set_active(0)
             side.pack_start(self.material_combo, False, False, 0)
 
@@ -251,7 +253,11 @@ if Gimp is not None:
         # -- actions ----------------------------------------------------------
 
         def _on_assign(self, _btn):
-            value = int(self.material_combo.get_active_id())
+            active = self.material_combo.get_active_id()
+            if active.startswith('group:'):
+                self.info.set_text('Pick a single material to assign (groups are for selecting).')
+                return
+            value = int(active)
             for i in self.selected:
                 self.table[i] = value
             self._refresh_text()
@@ -259,7 +265,11 @@ if Gimp is not None:
             self.grid.queue_draw()
 
         def _on_select_material(self, _btn):
-            self.grid.select_material(int(self.material_combo.get_active_id()))
+            active = self.material_combo.get_active_id()
+            if active.startswith('group:'):
+                self.grid.select_materials(MATERIAL_GROUPS[active[6:]][1])
+            else:
+                self.grid.select_material(int(active))
             self._update_info()
 
         def _on_clear(self, _btn):

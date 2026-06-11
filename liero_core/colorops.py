@@ -103,26 +103,30 @@ def gradient_palette_f(colors: Sequence[FColor], indices: Iterable[int],
 
 
 def similar_color_indices(colors: Sequence[Color], target: Color,
-                          hue_tol: float = 35 / 360.0, sat_floor: float = 0.15,
-                          light_tol: float = 0.20) -> set:
+                          hue_tol: float = 25 / 360.0, sat_floor: float = 0.12,
+                          light_tol: float = 0.35) -> set:
     """Indices whose color belongs to the same family as ``target``.
 
-    A saturated target selects all colors of a close hue (e.g. "all the
-    blues", whatever their lightness — a gradient/ramp counts as one family).
-    A gray target selects grays of similar lightness.
+    A saturated target selects colors of a close hue within a lightness band
+    (a ramp counts as one family); near-black/near-white are excluded — their
+    hue is numerically defined but visually meaningless. A gray or extreme
+    (near-black/white) target selects similar low-saturation lightness.
     """
     tr, tg, tb = [v / 255.0 for v in target]
     th, tl, ts = colorsys.rgb_to_hls(tr, tg, tb)
+    target_is_colorful = ts >= sat_floor and 0.04 < tl < 0.97
     out = set()
     for i, (r, g, b) in enumerate(colors):
         h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
-        if ts >= sat_floor:
+        if target_is_colorful:
+            if s < sat_floor or not 0.05 < l < 0.97:
+                continue
             hue_diff = abs(h - th)
             hue_diff = min(hue_diff, 1.0 - hue_diff)
-            if s >= sat_floor and hue_diff <= hue_tol:
+            if hue_diff <= hue_tol and abs(l - tl) <= light_tol:
                 out.add(i)
         else:
-            if s < sat_floor and abs(l - tl) <= light_tol:
+            if (s < sat_floor or l <= 0.05 or l >= 0.97) and abs(l - tl) <= 0.20:
                 out.add(i)
     return out
 

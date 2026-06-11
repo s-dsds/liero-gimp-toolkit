@@ -13,7 +13,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk  # noqa: E402
 
-from .defaults import MATERIAL, MATERIAL_NAMES, ANIMATED_INDICES  # noqa: E402
+from .defaults import MATERIAL, MATERIAL_NAMES, MATERIAL_GROUPS, ANIMATED_INDICES  # noqa: E402
 from .colorops import similar_color_indices  # noqa: E402
 
 CELL = 30  # swatch size in px
@@ -59,6 +59,21 @@ class PaletteGrid:
     def select_material(self, value):
         self.selected = {i for i, m in enumerate(self.table) if m == value}
         self.queue_draw()
+
+    def select_materials(self, values):
+        self.selected = {i for i, m in enumerate(self.table) if m in values}
+        self.queue_draw()
+
+    def animation_run_at(self, idx):
+        """The contiguous animated run containing idx, or None."""
+        if idx not in self.animated:
+            return None
+        a = b = idx
+        while a - 1 in self.animated:
+            a -= 1
+        while b + 1 in self.animated:
+            b += 1
+        return a, b
 
     def clear_selection(self):
         self.selected = set()
@@ -145,22 +160,45 @@ class PaletteGrid:
         material = self.table[idx]
         mat_name = MATERIAL_NAMES.get(material, str(material))
         similar = similar_color_indices(self.colors, self.colors[idx])
-        menu = Gtk.Menu()
         items = [
             (f"Select similar colors ({len(similar)})",
              lambda *_: self._apply_menu_selection(similar, idx)),
-            (f"Add similar colors to selection",
+            ("Add similar colors to selection",
              lambda *_: self._apply_menu_selection(similar, idx, add=True)),
             (f"Select material {mat_name}",
              lambda *_: self._apply_menu_selection(
                  {i for i, m in enumerate(self.table) if m == material}, idx)),
-            (f"Select animated indices",
-             lambda *_: self._apply_menu_selection(set(self.animated), idx)),
         ]
-        for label, handler in items:
+        for label, values in MATERIAL_GROUPS.values():
+            if material in values:
+                items.append((f"Select {label}",
+                              lambda *_, v=values: self._apply_menu_selection(
+                                  {i for i, m in enumerate(self.table) if m in v}, idx)))
+        run = self.animation_run_at(idx)
+        if run:
+            items.append((f"Select this animation ({run[0]}–{run[1]})",
+                          lambda *_, r=run: self._apply_menu_selection(
+                              set(range(r[0], r[1] + 1)), idx)))
+        r, g, b = self.colors[idx]
+        hex_text = f"#{r:02x}{g:02x}{b:02x}"
+        rgb_text = f"{r},{g},{b}"
+        items.append(None)  # separator
+        items.append((f"Copy {hex_text}", lambda *_: self._copy_text(hex_text)))
+        items.append((f"Copy {rgb_text}", lambda *_: self._copy_text(rgb_text)))
+        menu = Gtk.Menu()
+        for entry in items:
+            if entry is None:
+                menu.append(Gtk.SeparatorMenuItem())
+                continue
+            label, handler = entry
             item = Gtk.MenuItem(label=label)
             item.connect('activate', handler)
             menu.append(item)
         menu.show_all()
         self._menu = menu  # keep a reference while shown
         menu.popup_at_pointer(event)
+
+    @staticmethod
+    def _copy_text(text):
+        clipboard = Gtk.Clipboard.get_default(Gdk.Display.get_default())
+        clipboard.set_text(text, -1)
