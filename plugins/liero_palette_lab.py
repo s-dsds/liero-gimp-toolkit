@@ -105,20 +105,33 @@ def indices_from_image(image):
 if Gimp is not None:
     from liero_core.palette_grid import PaletteGrid
 
+    ZOOM_LEVELS = [0.5, 1.0, 2.0, 3.0, 4.0]
+
     class PreviewCanvas:
-        """Renders indexed pixels with the current palette, scaled to fit."""
+        """Renders indexed pixels with the current palette at a zoom factor."""
 
         def __init__(self):
             self.width = 0
             self.height = 0
             self.indices = b''
+            self.zoom = 1.0
             self._pixbuf = None
             self.widget = Gtk.DrawingArea()
-            self.widget.set_size_request(PREVIEW_W, PREVIEW_H)
             self.widget.connect('draw', self._on_draw)
 
         def set_pixels(self, width, height, indices):
             self.width, self.height, self.indices = width, height, indices
+            self._update_size()
+
+        def set_zoom(self, zoom):
+            self.zoom = zoom
+            self._update_size()
+            self.widget.queue_draw()
+
+        def _update_size(self):
+            if self.width:
+                self.widget.set_size_request(int(self.width * self.zoom),
+                                             int(self.height * self.zoom))
 
         def render(self, colors):
             if not self.indices:
@@ -140,9 +153,7 @@ if Gimp is not None:
         def _on_draw(self, widget, cr):
             if self._pixbuf is None:
                 return False
-            alloc = widget.get_allocation()
-            scale = min(alloc.width / self.width, alloc.height / self.height)
-            cr.scale(scale, scale)
+            cr.scale(self.zoom, self.zoom)
             Gdk.cairo_set_source_pixbuf(cr, self._pixbuf, 0, 0)
             cr.get_source().set_filter(cairo.Filter.NEAREST)
             cr.paint()
@@ -167,7 +178,7 @@ if Gimp is not None:
                                     hover_cb=self._update_info,
                                     select_cb=lambda idx: self._recompute(),
                                     animated=self.animated)
-            self.canvas = PreviewCanvas()
+            self.previews = []
 
             self.dialog = GimpUi.Dialog(title='Liero Palette Lab')
             self.dialog.add_button('_Cancel', Gtk.ResponseType.CANCEL)
@@ -273,31 +284,75 @@ if Gimp is not None:
                            'unique when applied.</small>')
             side.pack_end(tip, False, False, 0)
 
-            # right: preview
+            # right: stacked previews, scrollable, individually zoomable
             right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             hbox.pack_start(right, True, True, 0)
-            pframe = Gtk.Frame()
-            pframe.add(self.canvas.widget)
-            right.pack_start(pframe, True, True, 0)
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_size_request(PREVIEW_W + 60, PREVIEW_H + 120)
+            self.preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            scroll.add(self.preview_box)
+            right.pack_start(scroll, True, True, 0)
             prow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            load_btn = Gtk.Button(label='Load preview file… (.lev / .wlsprt / indexed .png)')
+            load_btn = Gtk.Button(label='Add preview… (.lev / .wlsprt / indexed .png)')
             load_btn.connect('clicked', self._on_load_preview)
             prow.pack_start(load_btn, True, True, 0)
             self.animate_toggle = Gtk.ToggleButton(label='Animate colors')
             self.animate_toggle.set_tooltip_text(
-                'Cycle the animated (colorAnim) ranges in the preview, like in game')
+                'Cycle the animated (colorAnim) ranges in the previews and the '
+                'palette grid, like in game')
             self.animate_toggle.connect('toggled', self._on_animate_toggled)
             prow.pack_start(self.animate_toggle, False, False, 0)
             right.pack_start(prow, False, False, 0)
 
-            self._load_preview_from_image(image)
+            self.dialog.set_default_size(1500, 860)
+            self._add_preview(f"Image: {image.get_name() or 'untitled'}",
+                              *indices_from_image(image))
             self._recompute()
             self._update_info()
 
         # -- preview sources ----------------------------------------------------
 
-        def _load_preview_from_image(self, image):
-            self.canvas.set_pixels(*indices_from_image(image))
+        def _add_preview(self, title, width, height, indices):
+            entry = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            header.pack_start(Gtk.Label(label=title, xalign=0), True, True, 0)
+            canvas = PreviewCanvas()
+            canvas.set_pixels(width, height, indices)
+
+            zoom_label = Gtk.Label(label='100%')
+
+            def set_zoom(z):
+                canvas.set_zoom(z)
+                zoom_label.set_text(f"{int(z * 100)}%")
+
+            zoom_out = Gtk.Button(label='−')
+            zoom_out.connect('clicked', lambda _b: set_zoom(
+                ZOOM_LEVELS[max(0, ZOOM_LEVELS.index(canvas.zoom) - 1)]))
+            zoom_in = Gtk.Button(label='+')
+            zoom_in.connect('clicked', lambda _b: set_zoom(
+                ZOOM_LEVELS[min(len(ZOOM_LEVELS) - 1, ZOOM_LEVELS.index(canvas.zoom) + 1)]))
+            close = Gtk.Button(label='✕')
+            close.connect('clicked', lambda _b: self._remove_preview(canvas, entry))
+            for w in (zoom_out, zoom_label, zoom_in, close):
+                header.pack_start(w, False, False, 0)
+            entry.pack_start(header, False, False, 0)
+
+            frame = Gtk.Frame()
+            align = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            align.pack_start(canvas.widget, False, False, 0)
+            frame.add(align)
+            entry.pack_start(frame, False, False, 0)
+
+            self.preview_box.pack_start(entry, False, False, 0)
+            entry.show_all()
+            self.previews.append(canvas)
+            canvas.render(self._maybe_animated(quantize(self.preview)))
+
+        def _remove_preview(self, canvas, entry):
+            if canvas in self.previews:
+                self.previews.remove(canvas)
+            entry.destroy()
 
         def _on_load_preview(self, _btn):
             chooser = Gtk.FileChooserDialog(title='Load preview source',
@@ -315,31 +370,29 @@ if Gimp is not None:
                 path = Path(chooser.get_filename())
                 chooser.destroy()
                 try:
-                    self._load_preview_file(path)
-                    self._render_preview()
+                    self._add_preview(path.name, *self._load_preview_pixels(path))
                 except Exception as exc:
                     traceback.print_exc()
                     self.info.set_text(f"Preview load error: {exc}")
             else:
                 chooser.destroy()
 
-        def _load_preview_file(self, path):
+        def _load_preview_pixels(self, path):
             suffix = path.suffix.lower()
             if suffix == '.lev':
-                self.canvas.set_pixels(*read_lev_pixels(path))
-            elif suffix == '.wlsprt':
-                self.canvas.set_pixels(*wlsprt_sheet(path, sheet_width=PREVIEW_W))
-            elif suffix == '.png':
+                return read_lev_pixels(path)
+            if suffix == '.wlsprt':
+                return wlsprt_sheet(path, sheet_width=PREVIEW_W)
+            if suffix == '.png':
                 img = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE,
                                      Gio.File.new_for_path(str(path)))
                 try:
                     if img.get_base_type() != Gimp.ImageBaseType.INDEXED:
                         raise ValueError('PNG is not indexed')
-                    self.canvas.set_pixels(*indices_from_image(img))
+                    return indices_from_image(img)
                 finally:
                     img.delete()
-            else:
-                raise ValueError(f'Unsupported preview source: {path}')
+            raise ValueError(f'Unsupported preview source: {path}')
 
         # -- transform pipeline ---------------------------------------------------
 
@@ -363,10 +416,11 @@ if Gimp is not None:
             self._update_info()
 
         def _render_preview(self):
-            colors8 = quantize(self.preview)
+            colors8 = self._maybe_animated(quantize(self.preview))
             self.grid.colors = list(colors8)
             self.grid.queue_draw()
-            self.canvas.render(self._maybe_animated(colors8))
+            for canvas in self.previews:
+                canvas.render(colors8)
 
         # -- color animation ------------------------------------------------------
 
@@ -414,7 +468,12 @@ if Gimp is not None:
                 self._anim_timer = None
                 return False
             self._anim_offset += 1
-            self.canvas.render(self._maybe_animated(quantize(self.preview)))
+            # animate the palette grid and every preview together
+            colors8 = self._maybe_animated(quantize(self.preview))
+            self.grid.colors = list(colors8)
+            self.grid.queue_draw()
+            for canvas in self.previews:
+                canvas.render(colors8)
             return True
 
         # -- selection helpers ------------------------------------------------------
