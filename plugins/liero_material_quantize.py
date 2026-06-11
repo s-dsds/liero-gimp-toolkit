@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""GIMP 3 plug-in draft: Liero material-aware quantization.
+"""GIMP 3 plug-in: Liero material-aware quantization.
 
-The core quantizer is implemented in liero_core.quantizer. This GIMP-side file is
-an integration skeleton for scanning layer names, collecting pixels, and applying
-an indexed output. Pixel extraction differs across GIMP GI builds, so keep this
-as a first iteration and test with your installed GIMP 3.2 Python console.
+Thin shell around liero_core.quantize_gimp: scans layer groups named by
+material (rock, dirt, background dirt, worm, ...), quantizes each material's
+pixels into the base palette (reusing close same-material colors, allocating
+new ones from the 188-235 replacement pool), and produces a new indexed image
+plus the forked palette.
 """
 from __future__ import annotations
-import json, sys
+import sys
+import traceback
 from pathlib import Path
 
 try:
@@ -24,51 +26,7 @@ for _candidate in (PLUGIN_DIR, PLUGIN_DIR.parent):
     if (_candidate / 'liero_core').is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-from liero_core.defaults import MATERIAL, MATERIAL_NAMES
-from liero_core.material import classify_name
-from liero_core.quantizer import median_cut, choose_palette_slots, remap_pixels_to_indices
-
-
-def scan_group_materials(root_items):
-    """Return [(item, material)] by matching item names.
-
-    In GIMP this should be called with image.get_layers() and recursively with
-    group.get_children() where available.
-    """
-    out = []
-    stack = list(root_items)
-    while stack:
-        item = stack.pop(0)
-        name = item.get_name() if hasattr(item, 'get_name') else str(item)
-        material = classify_name(name)
-        if material is not None:
-            out.append((item, material))
-        if hasattr(item, 'get_children'):
-            try:
-                stack.extend(item.get_children())
-            except Exception:
-                pass
-    return out
-
-
-def plan_material_palette(base_palette, material_pixels, material_counts):
-    """Pure-Python planning helper.
-
-    material_pixels: dict[int, list[Color]]
-    material_counts: dict[int, int]
-    """
-    palette = list(base_palette[:256])
-    material_table = None
-    assignments = {}
-    for material, pixels in material_pixels.items():
-        k = int(material_counts.get(material, 0))
-        if k <= 0 or not pixels:
-            continue
-        reps = median_cut(pixels, k)
-        allowed, palette, material_table = choose_palette_slots(reps, palette, material, material_table=material_table)
-        assignments[material] = allowed
-    return palette, material_table, assignments
-
+PROC_QUANTIZE = 'python-fu-liero-material-quantize'
 
 if Gimp is not None:
     class LieroMaterialQuantize(Gimp.PlugIn):
@@ -76,21 +34,41 @@ if Gimp is not None:
             return False
 
         def do_query_procedures(self):
-            return ['python-fu-liero-material-quantize']
+            return [PROC_QUANTIZE]
 
         def do_create_procedure(self, name):
             proc = Gimp.ImageProcedure.new(self, name, Gimp.PDBProcType.PLUGIN, self.run, None)
             proc.set_image_types('RGB*')
-            proc.set_menu_label('Quantize by Liero Material...')
+            proc.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
+            proc.set_menu_label('Quantize by Material...')
             proc.add_menu_path('<Image>/Liero')
-            proc.set_documentation('Quantize layer groups by Liero material.', 'First iteration integration skeleton.', name)
+            proc.set_documentation(
+                'Quantize RGB layer groups into a forked Liero palette.',
+                'Scans layer/group names for materials, quantizes each material '
+                'into the base palette (reusing close same-material colors, '
+                'allocating from the 188-235 pool), and creates a new indexed '
+                'image plus the forked palette with material entry names.',
+                name)
             proc.set_attribution('liero-gimp-toolkit', 'liero-gimp-toolkit', '2026')
             return proc
 
         def run(self, procedure, run_mode, image, drawables, config, data):
-            # v0.1: scanning shell only. Next step is pixel extraction from material groups.
-            groups = scan_group_materials(image.get_layers() if hasattr(image, 'get_layers') else [])
-            print('Detected Liero material groups:', [(g.get_name(), MATERIAL_NAMES.get(m, m)) for g, m in groups])
-            return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+            try:
+                if run_mode != Gimp.RunMode.INTERACTIVE:
+                    return procedure.new_return_values(
+                        Gimp.PDBStatusType.CALLING_ERROR,
+                        GLib.Error('Quantize by Material is interactive only.'))
+                if image is None:
+                    return procedure.new_return_values(
+                        Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error('no image'))
+                GimpUi.init(PROC_QUANTIZE)
+                from liero_core.quantize_gimp import QuantizeDialog
+                QuantizeDialog(image).run()
+                return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+            except Exception as exc:
+                traceback.print_exc()
+                Gimp.message(f"Quantize by Material failed: {exc}")
+                return procedure.new_return_values(
+                    Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     Gimp.main(LieroMaterialQuantize.__gtype__, sys.argv)

@@ -65,6 +65,16 @@ on Linux). Read this before touching the GIMP-side code.
   `Gtk.FileChooserDialog` does not (trade-off taken in Import).
 - Headless `-d` (no data) hides palette resources — palette lists look empty
   in batch tests; that's not a bug.
+- **You cannot write raw indices into an indexed drawable**: `buffer.set`
+  needs a format *name* and the indexed format's name is unobtainable
+  (GPointer). `convert_indexed(CUSTOM, palette)` is lossy — it collapsed ±1
+  uniquify nudges (mapped to the duplicate's slot) and even a gray-ramp
+  palette misassigned 13/256 indices. The exact route: write an indexed PNG
+  yourself (`formats.write_indexed_png`, pure python) and `Gimp.file_load` it
+  — all 256 indices and the palette verified byte-exact.
+- `buffer.set(rect, "R'G'B'A u8", data)` wants a plain bytes sequence (NOT
+  GLib.Bytes). Group layers expose their composited projection via
+  `get_buffer()` — reading a group gives the stacked children.
 
 - **`GeglColor.set_rgba()`/`get_rgba()` are LINEAR RGB**, not sRGB. Reading a
   loaded image's colormap with `get_rgba` gives values that render too dark;

@@ -3,7 +3,7 @@
 Parked ideas, rough priorities. Things the user explicitly asked for are
 marked **(requested)**.
 
-## Project 3: material quantizer (the remaining big one)
+## Project 3: material quantizer — DONE (v1), remaining ideas below
 
 The core (median-cut, slot allocation, remapping in `liero_core/quantizer.py`)
 is tested; the GIMP side is still the v0.1 skeleton. Plan:
