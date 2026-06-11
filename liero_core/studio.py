@@ -31,9 +31,10 @@ from .formats import (load_palette, read_exe_color_anim, read_lev_pixels,  # noq
                       write_lev_palette, write_exe_palette)
 from .palette import write_gpl  # noqa: E402
 from .gimp_colors import color_from_rgb8, rgb8_from_color, make_gimp_palette  # noqa: E402
-from .material import (index_info, materials_from_entry_names,  # noqa: E402
-                       animated_from_entry_names, indices_to_anim_pairs,
-                       material_table_to_js, parse_material_text)
+from .material import (index_info, indices_for_material,  # noqa: E402
+                       materials_from_entry_names, animated_from_entry_names,
+                       indices_to_anim_pairs, material_table_to_js,
+                       parse_material_text)
 from .palette import Palette  # noqa: E402
 from .palette_grid import PaletteGrid  # noqa: E402
 
@@ -325,12 +326,19 @@ class PaletteStudioDialog:
             'Nudge duplicate RGB values minimally so GIMP can tell colormap '
             'entries apart (saved palettes always keep the raw colors)')
         left.pack_start(self.unique_check, False, False, 0)
+        write_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         write_btn = Gtk.Button(label='Write palette file…')
         write_btn.set_tooltip_text(
             'Export .gpl/.lpl, or patch the palette into an existing '
             '.wlsprt / .lev / LIERO.EXE (sprites and code untouched)')
         write_btn.connect('clicked', self._on_write_file)
-        left.pack_start(write_btn, False, False, 0)
+        write_row.pack_start(write_btn, True, True, 0)
+        split_btn = Gtk.Button(label='Export by material…')
+        split_btn.set_tooltip_text(
+            'Write one .gpl per material (pick which) into a folder')
+        split_btn.connect('clicked', self._on_export_materials)
+        write_row.pack_start(split_btn, True, True, 0)
+        left.pack_start(write_row, False, False, 0)
 
         # ---- middle: controls ------------------------------------------------
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -870,6 +878,71 @@ class PaletteStudioDialog:
         except Exception as exc:
             traceback.print_exc()
             self.info.set_text(f"Write failed: {exc}")
+
+    def _export_material_files(self, folder: Path, selection: list, full: bool):
+        """Write the chosen per-material .gpl files (entry names keep the
+        original palette indices for traceability)."""
+        colors = quantize(self.preview)
+        base_name = self._palette_name()
+        written = []
+        if full:
+            out = folder / f"{base_name}-full.gpl"
+            write_gpl(out, f"{base_name}-full", colors, names=self._entry_names())
+            written.append(out.name)
+        for mat_name in selection:
+            idxs = indices_for_material(MATERIAL[mat_name], self.table)
+            if not idxs:
+                continue
+            out = folder / f"{base_name}-{mat_name}.gpl"
+            write_gpl(out, f"{base_name}-{mat_name}",
+                      [colors[i] for i in idxs],
+                      names=[f"{i:03d}" + (' ANIM' if i in self.animated else '')
+                             for i in idxs])
+            written.append(out.name)
+        return written
+
+    def _on_export_materials(self, _btn):
+        chooser = Gtk.FileChooserDialog(title='Export material palettes to folder',
+                                        transient_for=self.dialog,
+                                        action=Gtk.FileChooserAction.SELECT_FOLDER)
+        chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
+        chooser.add_button('_Export', Gtk.ResponseType.OK)
+        # sub-palette picker lives inside the folder chooser
+        extra = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        extra.pack_start(Gtk.Label(label='Sub-palettes to export:', xalign=0),
+                         False, False, 0)
+        grid_box = Gtk.FlowBox()
+        grid_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        grid_box.set_max_children_per_line(5)
+        full_check = Gtk.CheckButton(label='Full palette')
+        full_check.set_active(True)
+        grid_box.add(full_check)
+        checks = {}
+        for mat_name, mat_value in MATERIAL.items():
+            count = len(indices_for_material(mat_value, self.table))
+            check = Gtk.CheckButton(label=f"{mat_name} ({count})")
+            check.set_active(count > 0)
+            check.set_sensitive(count > 0)
+            checks[mat_name] = check
+            grid_box.add(check)
+        extra.pack_start(grid_box, False, False, 0)
+        extra.show_all()
+        chooser.set_extra_widget(extra)
+        folder = None
+        if chooser.run() == Gtk.ResponseType.OK:
+            folder = Path(chooser.get_filename())
+            selection = [n for n, c in checks.items() if c.get_active()]
+            full = full_check.get_active()
+        chooser.destroy()
+        if folder is None:
+            return
+        try:
+            written = self._export_material_files(folder, selection, full)
+            Gimp.message(f"Wrote {len(written)} palettes to {folder}:\n"
+                         + "\n".join(written))
+        except Exception as exc:
+            traceback.print_exc()
+            self.info.set_text(f"Export failed: {exc}")
 
     def _on_save_materials(self, _btn):
         chooser = Gtk.FileChooserDialog(title='Save material table',
