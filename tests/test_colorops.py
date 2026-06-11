@@ -96,10 +96,13 @@ def test_similar_colors_hue_family():
         (200, 40, 40),    # 2 red
         (128, 128, 128),  # 3 gray
         (60, 60, 90),     # 4 dull blue (still bluish)
+        (8, 8, 12),       # 5 near-black with bluish tint -> excluded
+        (250, 250, 255),  # 6 near-white -> excluded
     ]
     sel = similar_color_indices(colors, (40, 40, 200))
     assert 0 in sel and 1 in sel and 4 in sel
     assert 2 not in sel and 3 not in sel
+    assert 5 not in sel and 6 not in sel
 
 
 def test_similar_colors_grays():

@@ -22,6 +22,14 @@ MATERIAL = {
 
 MATERIAL_NAMES = {v: k for k, v in MATERIAL.items()}
 
+# Frequently co-edited material families (selectable together in the UIs).
+MATERIAL_GROUPS = {
+    "DIRTS": ("Dirts (DIRT + DIRT_2)", frozenset({1, 2})),
+    "BACKGROUNDS": ("Backgrounds (BG + BG_SEESHADOW)", frozenset({8, 24})),
+    "BG_DIRTS": ("BG + BG dirts", frozenset({8, 9, 10})),
+    "ALL_DIRTS": ("All dirts (incl. BG dirts)", frozenset({1, 2, 9, 10})),
+}
+
 # Verified byte-for-byte against both LIERO.EXE 1.33 (bitplanes at 0x1C2E0 /
 # 0x1AEA8) and wgetch's WebLiero material reference; the two agree. The
 # originally transcribed table had the 160-171 and 176-184 blocks shifted by 4.

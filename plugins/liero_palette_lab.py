@@ -39,7 +39,7 @@ for _candidate in (PLUGIN_DIR, PLUGIN_DIR.parent):
 
 from liero_core.colorops import (adjusted_palette_f, gradient_palette_f, quantize,
                                  to_float, uniquify_palette)
-from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS, ANIMATED_INDICES
+from liero_core.defaults import MATERIAL, MATERIAL_GROUPS, DEFAULT_MATERIALS, ANIMATED_INDICES
 from liero_core.formats import read_lev_pixels, wlsprt_sheet
 from liero_core.material import (index_info, materials_from_entry_names,
                                  animated_from_entry_names)
@@ -106,33 +106,115 @@ def indices_from_image(image):
 if Gimp is not None:
     from liero_core.palette_grid import PaletteGrid
 
-    ZOOM_LEVELS = [0.5, 1.0, 2.0, 3.0, 4.0]
+    ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.25, 8.0, 1.25
 
     class PreviewCanvas:
-        """Renders indexed pixels with the current palette at a zoom factor."""
+        """Renders indexed pixels with the current palette.
 
-        def __init__(self):
+        Mouse wheel zooms (anchored on the pointer), dragging pans (inside
+        the per-preview scroller), a plain click picks the pixel's palette
+        index via ``pick_cb``.
+        """
+
+        def __init__(self, pick_cb=None, zoom_cb=None):
             self.width = 0
             self.height = 0
             self.indices = b''
             self.zoom = 1.0
+            self.hadj = None  # set by the host once inside a ScrolledWindow
+            self.vadj = None
+            self._pick_cb = pick_cb
+            self._zoom_cb = zoom_cb
             self._pixbuf = None
+            self._drag = None
             self.widget = Gtk.DrawingArea()
+            self.widget.add_events(Gdk.EventMask.SCROLL_MASK
+                                   | Gdk.EventMask.BUTTON_PRESS_MASK
+                                   | Gdk.EventMask.BUTTON_RELEASE_MASK
+                                   | Gdk.EventMask.POINTER_MOTION_MASK)
             self.widget.connect('draw', self._on_draw)
+            self.widget.connect('scroll-event', self._on_scroll)
+            self.widget.connect('button-press-event', self._on_press)
+            self.widget.connect('button-release-event', self._on_release)
+            self.widget.connect('motion-notify-event', self._on_motion)
 
         def set_pixels(self, width, height, indices):
             self.width, self.height, self.indices = width, height, indices
             self._update_size()
 
-        def set_zoom(self, zoom):
+        def set_zoom(self, zoom, anchor=None):
+            zoom = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
+            if zoom == self.zoom:
+                return
+            old = self.zoom
             self.zoom = zoom
             self._update_size()
+            if anchor and self.hadj and self.vadj:
+                ax, ay = anchor
+                ratio = zoom / old
+
+                def fix_scroll():
+                    self.hadj.set_value((self.hadj.get_value() + ax) * ratio - ax)
+                    self.vadj.set_value((self.vadj.get_value() + ay) * ratio - ay)
+                    return False
+                GLib.idle_add(fix_scroll)
             self.widget.queue_draw()
+            if self._zoom_cb:
+                self._zoom_cb(self.zoom)
 
         def _update_size(self):
             if self.width:
                 self.widget.set_size_request(int(self.width * self.zoom),
                                              int(self.height * self.zoom))
+
+        # wheel = zoom anchored on the pointer
+        def _on_scroll(self, widget, event):
+            if event.direction == Gdk.ScrollDirection.UP:
+                factor = ZOOM_STEP
+            elif event.direction == Gdk.ScrollDirection.DOWN:
+                factor = 1 / ZOOM_STEP
+            elif event.direction == Gdk.ScrollDirection.SMOOTH:
+                factor = ZOOM_STEP if event.delta_y < 0 else 1 / ZOOM_STEP
+            else:
+                return False
+            anchor = None
+            if self.hadj and self.vadj:
+                anchor = (event.x - self.hadj.get_value(),
+                          event.y - self.vadj.get_value())
+            self.set_zoom(self.zoom * factor, anchor=anchor)
+            return True  # consume: don't scroll the pane
+
+        # drag = pan, click (no movement) = pick the pixel's index
+        def _on_press(self, widget, event):
+            if event.button == 1:
+                self._drag = (event.x_root, event.y_root,
+                              self.hadj.get_value() if self.hadj else 0,
+                              self.vadj.get_value() if self.vadj else 0, False)
+            return True
+
+        def _on_motion(self, widget, event):
+            if self._drag is None:
+                return False
+            x0, y0, h0, v0, moved = self._drag
+            dx, dy = event.x_root - x0, event.y_root - y0
+            if abs(dx) + abs(dy) > 3:
+                moved = True
+            self._drag = (x0, y0, h0, v0, moved)
+            if moved and self.hadj and self.vadj:
+                self.hadj.set_value(h0 - dx)
+                self.vadj.set_value(v0 - dy)
+            return True
+
+        def _on_release(self, widget, event):
+            if event.button != 1 or self._drag is None:
+                return False
+            moved = self._drag[4]
+            self._drag = None
+            if not moved and self._pick_cb and self.width:
+                px, py = int(event.x / self.zoom), int(event.y / self.zoom)
+                if 0 <= px < self.width and 0 <= py < self.height:
+                    self._pick_cb(self.indices[py * self.width + px])
+            return True
 
         def render(self, colors):
             if not self.indices:
@@ -220,6 +302,8 @@ if Gimp is not None:
             self.material_combo = Gtk.ComboBoxText()
             for mat_name in MATERIAL:
                 self.material_combo.append(str(MATERIAL[mat_name]), mat_name)
+            for gid, (label, _values) in MATERIAL_GROUPS.items():
+                self.material_combo.append(f"group:{gid}", label)
             self.material_combo.set_active(0)
             sel_row.pack_start(self.material_combo, True, True, 0)
             sel_btn = Gtk.Button(label='Select material')
@@ -304,6 +388,12 @@ if Gimp is not None:
                 'palette grid, like in game')
             self.animate_toggle.connect('toggled', self._on_animate_toggled)
             prow.pack_start(self.animate_toggle, False, False, 0)
+            self.focus_toggle = Gtk.ToggleButton(label='Focus selection')
+            self.focus_toggle.set_tooltip_text(
+                'Previews show only the selected colors; everything else turns '
+                'magenta so even single pixels stand out')
+            self.focus_toggle.connect('toggled', lambda _b: self._render_preview())
+            prow.pack_start(self.focus_toggle, False, False, 0)
             right.pack_start(prow, False, False, 0)
 
             self.dialog.set_default_size(1500, 860)
@@ -318,37 +408,43 @@ if Gimp is not None:
             entry = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             header.pack_start(Gtk.Label(label=title, xalign=0), True, True, 0)
-            canvas = PreviewCanvas()
-            canvas.set_pixels(width, height, indices)
 
             zoom_label = Gtk.Label(label='100%')
-
-            def set_zoom(z):
-                canvas.set_zoom(z)
-                zoom_label.set_text(f"{int(z * 100)}%")
+            canvas = PreviewCanvas(
+                pick_cb=self._on_preview_pick,
+                zoom_cb=lambda z: zoom_label.set_text(f"{round(z * 100)}%"))
+            canvas.set_pixels(width, height, indices)
 
             zoom_out = Gtk.Button(label='−')
-            zoom_out.connect('clicked', lambda _b: set_zoom(
-                ZOOM_LEVELS[max(0, ZOOM_LEVELS.index(canvas.zoom) - 1)]))
+            zoom_out.connect('clicked', lambda _b: canvas.set_zoom(canvas.zoom / ZOOM_STEP))
             zoom_in = Gtk.Button(label='+')
-            zoom_in.connect('clicked', lambda _b: set_zoom(
-                ZOOM_LEVELS[min(len(ZOOM_LEVELS) - 1, ZOOM_LEVELS.index(canvas.zoom) + 1)]))
+            zoom_in.connect('clicked', lambda _b: canvas.set_zoom(canvas.zoom * ZOOM_STEP))
             close = Gtk.Button(label='✕')
             close.connect('clicked', lambda _b: self._remove_preview(canvas, entry))
             for w in (zoom_out, zoom_label, zoom_in, close):
                 header.pack_start(w, False, False, 0)
             entry.pack_start(header, False, False, 0)
 
-            frame = Gtk.Frame()
-            align = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-            align.pack_start(canvas.widget, False, False, 0)
-            frame.add(align)
-            entry.pack_start(frame, False, False, 0)
+            # each preview scrolls inside a fixed-height window so zooming
+            # never pushes the controls (or other previews) off screen
+            inner = Gtk.ScrolledWindow()
+            inner.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            inner.set_size_request(-1, min(380, height + 12))
+            inner.add(canvas.widget)
+            canvas.hadj = inner.get_hadjustment()
+            canvas.vadj = inner.get_vadjustment()
+            entry.pack_start(inner, False, False, 0)
 
             self.preview_box.pack_start(entry, False, False, 0)
             entry.show_all()
             self.previews.append(canvas)
-            canvas.render(self._maybe_animated(quantize(self.preview)))
+            canvas.render(self._canvas_colors())
+
+        def _on_preview_pick(self, idx):
+            self.grid.selected = {idx}
+            self.grid.last_click = idx
+            self._update_info(idx)
+            self._recompute()
 
         def _remove_preview(self, canvas, entry):
             if canvas in self.previews:
@@ -416,12 +512,23 @@ if Gimp is not None:
             self._render_preview()
             self._update_info()
 
+        FOCUS_COLOR = (255, 0, 255)
+
+        def _canvas_colors(self):
+            """Colors for the preview canvases: animation + focus applied."""
+            colors8 = self._maybe_animated(quantize(self.preview))
+            if self.focus_toggle.get_active():
+                colors8 = [c if i in self.grid.selected else self.FOCUS_COLOR
+                           for i, c in enumerate(colors8)]
+            return colors8
+
         def _render_preview(self):
             colors8 = self._maybe_animated(quantize(self.preview))
             self.grid.colors = list(colors8)
             self.grid.queue_draw()
+            canvas_colors = self._canvas_colors()
             for canvas in self.previews:
-                canvas.render(colors8)
+                canvas.render(canvas_colors)
 
         # -- color animation ------------------------------------------------------
 
@@ -469,18 +576,17 @@ if Gimp is not None:
                 self._anim_timer = None
                 return False
             self._anim_offset += 1
-            # animate the palette grid and every preview together
-            colors8 = self._maybe_animated(quantize(self.preview))
-            self.grid.colors = list(colors8)
-            self.grid.queue_draw()
-            for canvas in self.previews:
-                canvas.render(colors8)
+            self._render_preview()  # grid and every preview together
             return True
 
         # -- selection helpers ------------------------------------------------------
 
         def _on_select_material(self, _btn):
-            self.grid.select_material(int(self.material_combo.get_active_id()))
+            active = self.material_combo.get_active_id()
+            if active.startswith('group:'):
+                self.grid.select_materials(MATERIAL_GROUPS[active[6:]][1])
+            else:
+                self.grid.select_material(int(active))
             self._recompute()
 
         def _on_select_animated(self, _btn):
