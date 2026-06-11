@@ -39,6 +39,7 @@ class PaletteGrid:
         self.colors = list(colors[:256])
         self.table = list(table[:256])
         self.animated = set(ANIMATED_INDICES if animated is None else animated)
+        self.locked = set()  # drawn struck-through; hosts keep it in sync
         self.selected = set()
         self.last_click = 0
         self._hover_cb = hover_cb
@@ -99,6 +100,12 @@ class PaletteGrid:
                 cr.set_source_rgb(*fg)
                 cr.arc(x + CELL - 5, y + 5, 2.2, 0, 6.2832)
                 cr.fill()
+            if i in self.locked:
+                cr.set_source_rgb(*fg)
+                cr.set_line_width(1)
+                cr.move_to(x + 3, y + 3)
+                cr.line_to(x + CELL - 3, y + CELL - 3)
+                cr.stroke()
             if i in self.selected:
                 cr.set_line_width(2)
                 cr.set_source_rgb(1, 1, 1)

@@ -115,260 +115,6 @@ def validation_report(pal: Palette, table=None) -> str:
 
 
 if Gimp is not None:
-    from liero_core.palette_grid import PaletteGrid
-
-    class PaletteMaterialEditor:
-        """Palette grid with on-the-fly material editing.
-
-        Click: select. Ctrl+click: toggle. Shift+click: range.
-        Double-click: edit the color. Badges show the material of each index;
-        a dot marks animated indices.
-        """
-
-        def __init__(self, colors, table, name, apply_default, can_apply, animated=None):
-            self.grid = PaletteGrid(colors, table,
-                                    hover_cb=self._update_info,
-                                    select_cb=self._update_info,
-                                    edit_cb=self._edit_color,
-                                    animated=animated)
-
-            self.dialog = GimpUi.Dialog(title='Liero Palette Editor')
-            self.dialog.add_button('_Cancel', Gtk.ResponseType.CANCEL)
-            self.dialog.add_button('Create _Palette', Gtk.ResponseType.OK)
-            self.dialog.set_default_response(Gtk.ResponseType.OK)
-
-            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-            self.dialog.get_content_area().add(vbox)
-            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            vbox.pack_start(hbox, True, True, 0)
-
-            frame = Gtk.Frame()
-            frame.add(self.grid.widget)
-            hbox.pack_start(frame, False, False, 0)
-
-            side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            hbox.pack_start(side, True, True, 0)
-
-            self.info = Gtk.Label(xalign=0)
-            self.info.set_line_wrap(True)
-            self.info.set_size_request(260, -1)
-            side.pack_start(self.info, False, False, 0)
-            side.pack_start(Gtk.Separator(), False, False, 4)
-
-            self.material_combo = Gtk.ComboBoxText()
-            for mat_name in MATERIAL:
-                self.material_combo.append(str(MATERIAL[mat_name]), mat_name)
-            for gid, (label, _values) in MATERIAL_GROUPS.items():
-                self.material_combo.append(f"group:{gid}", label)
-            self.material_combo.set_active(0)
-            side.pack_start(self.material_combo, False, False, 0)
-
-            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            assign = Gtk.Button(label='Assign to selection')
-            assign.connect('clicked', self._on_assign)
-            btn_box.pack_start(assign, True, True, 0)
-            select = Gtk.Button(label='Select material')
-            select.connect('clicked', self._on_select_material)
-            btn_box.pack_start(select, True, True, 0)
-            side.pack_start(btn_box, False, False, 0)
-
-            row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            clear = Gtk.Button(label='Clear selection')
-            clear.connect('clicked', self._on_clear)
-            row2.pack_start(clear, True, True, 0)
-            anim = Gtk.Button(label='Toggle animated')
-            anim.set_tooltip_text('Mark/unmark the selected indices as color-animated '
-                                  '(colorAnim); stored as ANIM in palette entry names')
-            anim.connect('clicked', self._on_toggle_animated)
-            row2.pack_start(anim, True, True, 0)
-            side.pack_start(row2, False, False, 0)
-            side.pack_start(Gtk.Separator(), False, False, 4)
-
-            side.pack_start(Gtk.Label(label='GIMP palette name:', xalign=0), False, False, 0)
-            self.name_entry = Gtk.Entry(text=name)
-            side.pack_start(self.name_entry, False, False, 0)
-            self.apply_check = Gtk.CheckButton(label='Apply to image colormap')
-            self.apply_check.set_active(apply_default and can_apply)
-            self.apply_check.set_sensitive(can_apply)
-            side.pack_start(self.apply_check, False, False, 0)
-
-            save_mats = Gtk.Button(label='Save materials…')
-            save_mats.connect('clicked', self._on_save_materials)
-            side.pack_start(save_mats, False, False, 0)
-
-            tip = Gtk.Label(xalign=0)
-            tip.set_markup('<small>Click: select · Ctrl: toggle · Shift: range\n'
-                           'Double-click: edit color · dot = animated</small>')
-            side.pack_end(tip, False, False, 0)
-
-            # material table as text: paste a room-script expression or array
-            # here, or copy the regenerated expression back into mapsettings.js
-            vbox.pack_start(Gtk.Label(
-                label='Material table (room-script expression or array — paste & apply, or copy out):',
-                xalign=0), False, False, 0)
-            text_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            vbox.pack_start(text_row, False, False, 0)
-            scroll = Gtk.ScrolledWindow()
-            scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-            scroll.set_size_request(-1, 80)
-            self.text_view = Gtk.TextView()
-            self.text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-            self.text_view.set_monospace(True)
-            scroll.add(self.text_view)
-            text_row.pack_start(scroll, True, True, 0)
-            text_btns = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            apply_text = Gtk.Button(label='Apply text to grid')
-            apply_text.connect('clicked', self._on_apply_text)
-            text_btns.pack_start(apply_text, False, False, 0)
-            refresh_text = Gtk.Button(label='Refresh from grid')
-            refresh_text.connect('clicked', lambda _b: self._refresh_text())
-            text_btns.pack_start(refresh_text, False, False, 0)
-            text_row.pack_start(text_btns, False, False, 0)
-
-            self._refresh_text()
-            self._update_info()
-
-        # -- grid state (delegated to the shared widget) -----------------------
-
-        @property
-        def colors(self):
-            return self.grid.colors
-
-        @property
-        def table(self):
-            return self.grid.table
-
-        @table.setter
-        def table(self, value):
-            self.grid.table = list(value)
-
-        @property
-        def selected(self):
-            return self.grid.selected
-
-        @selected.setter
-        def selected(self, value):
-            self.grid.selected = set(value)
-
-        # -- actions ----------------------------------------------------------
-
-        def _on_assign(self, _btn):
-            active = self.material_combo.get_active_id()
-            if active.startswith('group:'):
-                self.info.set_text('Pick a single material to assign (groups are for selecting).')
-                return
-            value = int(active)
-            for i in self.selected:
-                self.table[i] = value
-            self._refresh_text()
-            self._update_info()
-            self.grid.queue_draw()
-
-        def _on_select_material(self, _btn):
-            active = self.material_combo.get_active_id()
-            if active.startswith('group:'):
-                self.grid.select_materials(MATERIAL_GROUPS[active[6:]][1])
-            else:
-                self.grid.select_material(int(active))
-            self._update_info()
-
-        def _on_clear(self, _btn):
-            self.grid.clear_selection()
-            self._update_info()
-
-        def _on_toggle_animated(self, _btn):
-            self.grid.animated.symmetric_difference_update(self.selected)
-            self._update_info()
-            self.grid.queue_draw()
-
-        def _edit_color(self, idx):
-            chooser = Gtk.ColorChooserDialog(title=f'Color for index {idx}',
-                                             transient_for=self.dialog)
-            chooser.set_use_alpha(False)
-            r, g, b = self.colors[idx]
-            chooser.set_rgba(Gdk.RGBA(r / 255.0, g / 255.0, b / 255.0, 1.0))
-            if chooser.run() == Gtk.ResponseType.OK:
-                rgba = chooser.get_rgba()
-                self.colors[idx] = (round(rgba.red * 255), round(rgba.green * 255),
-                                    round(rgba.blue * 255))
-            chooser.destroy()
-            self._update_info(idx)
-            self.grid.queue_draw()
-
-        def _refresh_text(self):
-            self.text_view.get_buffer().set_text(
-                "materials: " + material_table_to_js(self.table) + ",")
-
-        def _on_apply_text(self, _btn):
-            buf = self.text_view.get_buffer()
-            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-            try:
-                self.table = parse_material_text(text)
-            except Exception as exc:
-                self.info.set_text(f"Material text error: {exc}")
-                return
-            self._update_info()
-            self.grid.queue_draw()
-
-        def _on_save_materials(self, _btn):
-            chooser = Gtk.FileChooserDialog(title='Save material table',
-                                            transient_for=self.dialog,
-                                            action=Gtk.FileChooserAction.SAVE)
-            chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
-            chooser.add_button('_Save', Gtk.ResponseType.OK)
-            chooser.set_do_overwrite_confirmation(True)
-            chooser.set_current_name('materials.json')
-            for pattern, label in (('*.json', 'JSON array (*.json)'),
-                                   ('*.js', 'WLE room-script expression (*.js)')):
-                flt = Gtk.FileFilter()
-                flt.set_name(label)
-                flt.add_pattern(pattern)
-                chooser.add_filter(flt)
-            if chooser.run() == Gtk.ResponseType.OK:
-                out = Path(chooser.get_filename())
-                if out.suffix.lower() == '.js':
-                    out.write_text("materials: " + material_table_to_js(self.table) + ",\n")
-                else:
-                    out.write_text(json.dumps(self.table))
-                Gimp.message(f"Saved material table to {out}")
-            chooser.destroy()
-
-        def _update_info(self, idx=None):
-            lines = []
-            if idx is not None:
-                info = index_info(idx, self.table)
-                r, g, b = self.colors[idx]
-                flags = []
-                if idx in self.grid.animated:
-                    flags.append('animated')
-                if info.protected:
-                    flags.append('protected')
-                if info.preferred_replacement_candidate:
-                    flags.append('replacement-candidate')
-                lines.append(f"Index {idx}  #{r:02x}{g:02x}{b:02x}  {info.material_name}"
-                             + (f"  [{', '.join(flags)}]" if flags else ''))
-            else:
-                lines.append('Hover a swatch for details.')
-            lines.append(f"Selected: {len(self.selected)}")
-            anim_pairs = indices_to_anim_pairs(self.grid.animated)
-            lines.append(f"colorAnim: {anim_pairs}")
-            self.info.set_text("\n".join(lines))
-
-        def run(self):
-            self.dialog.show_all()
-            response = self.dialog.run()
-            result = None
-            if response == Gtk.ResponseType.OK:
-                result = {
-                    'colors': list(self.colors),
-                    'table': list(self.table),
-                    'animated': set(self.grid.animated),
-                    'name': self.name_entry.get_text().strip(),
-                    'apply': self.apply_check.get_active(),
-                }
-            self.dialog.destroy()
-            return result
-
     class LieroPaletteManagement(Gimp.PlugIn):
         def do_set_i18n(self, name):
             return False
@@ -497,15 +243,19 @@ if Gimp is not None:
             try:
                 gfile = config.get_property('file')
                 if run_mode == Gimp.RunMode.INTERACTIVE:
+                    # interactive import = the Palette Studio opened on a file
                     GimpUi.init(procedure.get_name())
                     path = self._choose_palette_file(
                         preselect=gfile.get_path() if gfile else None)
                     if path is None:
                         return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
-                elif gfile is None:
+                    from liero_core.studio import PaletteStudioDialog
+                    PaletteStudioDialog(image=image, initial_file=path,
+                                        name_hint=f"Liero {path.stem}").run()
+                    return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+                if gfile is None:
                     return self._error(procedure, 'No palette file selected.')
-                else:
-                    path = Path(gfile.get_path())
+                path = Path(gfile.get_path())
                 pal = load_palette_for_gimp(path)
                 table = self._materials_table(config) or list(DEFAULT_MATERIALS)
                 animated = set(ANIMATED_INDICES)
@@ -516,18 +266,7 @@ if Gimp is not None:
                 apply_flag = config.get_property('apply-to-image')
                 can_apply = (image is not None
                              and image.get_base_type() == Gimp.ImageBaseType.INDEXED)
-                if run_mode == Gimp.RunMode.INTERACTIVE:
-                    editor = PaletteMaterialEditor(pal.colors, table, name, apply_flag,
-                                                   can_apply, animated=animated)
-                    result = editor.run()
-                    if result is None:
-                        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
-                    pal = Palette(result['name'] or name, result['colors'])
-                    table = result['table']
-                    animated = result['animated']
-                    apply_flag = result['apply']
-                else:
-                    pal = Palette(name, pal.colors)
+                pal = Palette(name, pal.colors)
                 gimp_palette = make_gimp_palette(pal, table, animated)
                 applied = ''
                 if apply_flag:
