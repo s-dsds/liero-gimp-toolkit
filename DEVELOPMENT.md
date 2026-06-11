@@ -66,6 +66,14 @@ on Linux). Read this before touching the GIMP-side code.
 - Headless `-d` (no data) hides palette resources — palette lists look empty
   in batch tests; that's not a bug.
 
+- **`GeglColor.set_rgba()`/`get_rgba()` are LINEAR RGB**, not sRGB. Reading a
+  loaded image's colormap with `get_rgba` gives values that render too dark;
+  writing palette colors with `set_rgba` stores them too bright. Symmetric
+  read→write chains cancel out, which hid the bug. Always use
+  `liero_core.gimp_colors.color_from_rgb8` / `rgb8_from_color` (Babl
+  `"R'G'B' u8"` bytes — `gi.require_version('Babl', '0.1')`). The regression
+  test compares an imported palette against the source file bytes.
+
 ## Format ground truth (sources verified against each other)
 
 - **.wlsprt**: `WLSPRT` + u16le version (0) + palette flag byte + (if flag)

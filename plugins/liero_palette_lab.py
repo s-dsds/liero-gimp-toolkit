@@ -41,7 +41,8 @@ from liero_core.colorops import (adjusted_palette_f, gradient_palette_f, quantiz
                                  to_float, uniquify_palette)
 from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS, ANIMATED_INDICES
 from liero_core.formats import read_lev_pixels, wlsprt_sheet
-from liero_core.material import index_info, materials_from_entry_names
+from liero_core.material import (index_info, materials_from_entry_names,
+                                 animated_from_entry_names)
 
 PROC_LAB = 'python-fu-liero-palette-lab'
 
@@ -58,10 +59,9 @@ SLIDERS = [
 
 
 def colors_from_gimp_palette(gimp_palette):
-    out = []
-    for color in gimp_palette.get_colors():
-        r, g, b, _a = color.get_rgba()
-        out.append((round(r * 255), round(g * 255), round(b * 255)))
+    """Byte-exact sRGB colors (get_rgba would return linear = too dark)."""
+    from liero_core.gimp_colors import rgb8_from_color
+    out = [rgb8_from_color(c) for c in gimp_palette.get_colors()]
     while len(out) < 256:
         out.append((0, 0, 0))
     return out[:256]
@@ -150,22 +150,30 @@ if Gimp is not None:
 
 
     class PaletteLabDialog:
+        RESP_APPLY_IMAGE = 100
+        RESP_APPLY_BOTH = 101
+
         def __init__(self, image):
             self.image = image
             self.table = list(DEFAULT_MATERIALS)
+            self.animated = set(ANIMATED_INDICES)
+            self._anim_offset = 0
+            self._anim_timer = None
             base8 = colors_from_gimp_palette(image.get_palette())
             self.base = to_float(base8)          # committed state, floats
             self.preview = list(self.base)       # committed + live sliders
 
             self.grid = PaletteGrid(base8, self.table,
                                     hover_cb=self._update_info,
-                                    select_cb=lambda idx: self._recompute())
+                                    select_cb=lambda idx: self._recompute(),
+                                    animated=self.animated)
             self.canvas = PreviewCanvas()
 
             self.dialog = GimpUi.Dialog(title='Liero Palette Lab')
             self.dialog.add_button('_Cancel', Gtk.ResponseType.CANCEL)
-            self.dialog.add_button('_Apply & Close', Gtk.ResponseType.OK)
-            self.dialog.set_default_response(Gtk.ResponseType.OK)
+            self.dialog.add_button('Apply to _image', self.RESP_APPLY_IMAGE)
+            self.dialog.add_button('Apply + save _palette', self.RESP_APPLY_BOTH)
+            self.dialog.set_default_response(self.RESP_APPLY_BOTH)
 
             hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, margin=12)
             self.dialog.get_content_area().add(hbox)
@@ -271,9 +279,16 @@ if Gimp is not None:
             pframe = Gtk.Frame()
             pframe.add(self.canvas.widget)
             right.pack_start(pframe, True, True, 0)
+            prow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             load_btn = Gtk.Button(label='Load preview file… (.lev / .wlsprt / indexed .png)')
             load_btn.connect('clicked', self._on_load_preview)
-            right.pack_start(load_btn, False, False, 0)
+            prow.pack_start(load_btn, True, True, 0)
+            self.animate_toggle = Gtk.ToggleButton(label='Animate colors')
+            self.animate_toggle.set_tooltip_text(
+                'Cycle the animated (colorAnim) ranges in the preview, like in game')
+            self.animate_toggle.connect('toggled', self._on_animate_toggled)
+            prow.pack_start(self.animate_toggle, False, False, 0)
+            right.pack_start(prow, False, False, 0)
 
             self._load_preview_from_image(image)
             self._recompute()
@@ -351,7 +366,56 @@ if Gimp is not None:
             colors8 = quantize(self.preview)
             self.grid.colors = list(colors8)
             self.grid.queue_draw()
-            self.canvas.render(colors8)
+            self.canvas.render(self._maybe_animated(colors8))
+
+        # -- color animation ------------------------------------------------------
+
+        def _anim_runs(self):
+            """Consecutive runs of the animated set = colorAnim ranges."""
+            idxs = sorted(self.animated)
+            runs, i = [], 0
+            while i < len(idxs):
+                j = i
+                while j + 1 < len(idxs) and idxs[j + 1] == idxs[j] + 1:
+                    j += 1
+                runs.append((idxs[i], idxs[j]))
+                i = j + 1
+            return runs
+
+        def _maybe_animated(self, colors8):
+            if not self.animate_toggle.get_active():
+                return colors8
+            # Classic palette cycling: rotate colors inside each (from, to)
+            # range, all indices inclusive. (WebLiero reportedly skips one
+            # color due to an off-by-one — this preview follows the classic
+            # behavior; revisit if the in-game look matters more.)
+            out = list(colors8)
+            for a, b in self._anim_runs():
+                n = b - a + 1
+                if n < 2:
+                    continue
+                for k in range(n):
+                    out[a + k] = colors8[a + (k + self._anim_offset) % n]
+            return out
+
+        def _on_animate_toggled(self, _btn):
+            if self.animate_toggle.get_active():
+                if self._anim_timer is None:
+                    self._anim_timer = GLib.timeout_add(140, self._anim_tick)
+            else:
+                if self._anim_timer is not None:
+                    GLib.source_remove(self._anim_timer)
+                    self._anim_timer = None
+                self._anim_offset = 0
+                self._render_preview()
+
+        def _anim_tick(self):
+            if not self.animate_toggle.get_active():
+                self._anim_timer = None
+                return False
+            self._anim_offset += 1
+            self.canvas.render(self._maybe_animated(quantize(self.preview)))
+            return True
 
         # -- selection helpers ------------------------------------------------------
 
@@ -360,7 +424,7 @@ if Gimp is not None:
             self._recompute()
 
         def _on_select_animated(self, _btn):
-            self.grid.selected = set(ANIMATED_INDICES)
+            self.grid.selected = set(self.animated)
             self.grid.queue_draw()
             self._recompute()
 
@@ -383,6 +447,7 @@ if Gimp is not None:
             if source == '__image__':
                 base8 = colors_from_gimp_palette(self.image.get_palette())
                 self.table = list(DEFAULT_MATERIALS)
+                self.animated = set(ANIMATED_INDICES)
             else:
                 pals = Gimp.palettes_get_list(source)
                 pal = next((p for p in pals if p.get_name() == source), None)
@@ -391,8 +456,10 @@ if Gimp is not None:
                 base8 = colors_from_gimp_palette(pal)
                 names = [pal.get_entry_name(i)[1] for i in range(pal.get_color_count())]
                 self.table = materials_from_entry_names(names) or list(DEFAULT_MATERIALS)
+                self.animated = animated_from_entry_names(names) or set(ANIMATED_INDICES)
             self.base = to_float(base8)
             self.grid.table = list(self.table)
+            self.grid.animated = set(self.animated)
             self._reset_sliders_silent()
             self._recompute()
 
@@ -422,7 +489,9 @@ if Gimp is not None:
             base8 = colors_from_gimp_palette(self.image.get_palette())
             self.base = to_float(base8)
             self.table = list(DEFAULT_MATERIALS)
+            self.animated = set(ANIMATED_INDICES)
             self.grid.table = list(self.table)
+            self.grid.animated = set(self.animated)
             self._reset_sliders_silent()
             self._recompute()
 
@@ -432,7 +501,7 @@ if Gimp is not None:
                 info = index_info(idx, self.table)
                 r, g, b = self.grid.colors[idx]
                 lines.append(f"Index {idx}  #{r:02x}{g:02x}{b:02x}  {info.material_name}"
-                             + ('  [animated]' if info.animated else ''))
+                             + ('  [animated]' if idx in self.animated else ''))
             else:
                 lines.append('Hover a swatch for details.')
             lines.append(f"Selected: {len(self.grid.selected)}")
@@ -441,23 +510,30 @@ if Gimp is not None:
         # -- lifecycle ---------------------------------------------------------------
 
         def run(self):
+            from liero_core.gimp_colors import make_gimp_palette
             self.dialog.show_all()
             response = self.dialog.run()
             applied = False
             try:
-                if response == Gtk.ResponseType.OK:
-                    final = uniquify_palette(quantize(self.preview))
-                    gimp_palette = Gimp.Palette.new(
-                        f"{self.image.get_name() or 'image'} (Palette Lab)")
-                    color = Gegl.Color.new('black')
-                    for i, (r, g, b) in enumerate(final):
-                        color.set_rgba(r / 255.0, g / 255.0, b / 255.0, 1.0)
-                        gimp_palette.add_entry(
-                            f"{i:03d} {index_info(i, self.table).material_name}", color)
-                    self.image.set_palette(gimp_palette)
+                if response in (self.RESP_APPLY_IMAGE, self.RESP_APPLY_BOTH):
+                    raw = quantize(self.preview)
+                    base_name = f"{self.image.get_name() or 'image'} (Palette Lab)"
+                    # image colormap gets uniquified colors (GIMP requirement)
+                    tmp = make_gimp_palette(f"{base_name} (applied)",
+                                            uniquify_palette(raw),
+                                            table=self.table, animated=self.animated)
+                    self.image.set_palette(tmp)
+                    tmp.delete()
+                    if response == self.RESP_APPLY_BOTH:
+                        # keep a named palette with the raw colors + materials/ANIM
+                        make_gimp_palette(base_name, raw,
+                                          table=self.table, animated=self.animated)
                     Gimp.displays_flush()
                     applied = True
             finally:
+                if self._anim_timer is not None:
+                    GLib.source_remove(self._anim_timer)
+                    self._anim_timer = None
                 self.dialog.destroy()
             return applied
 

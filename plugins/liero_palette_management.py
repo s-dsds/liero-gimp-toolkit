@@ -35,9 +35,9 @@ import json
 
 from liero_core.colorops import uniquify_palette
 from liero_core.palette import Palette
-from liero_core.formats import load_palette
-from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js, parse_material_text
-from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS
+from liero_core.formats import load_palette, read_exe_color_anim
+from liero_core.material import index_info, indices_for_material, load_material_table, material_table_to_js, parse_material_text, indices_to_anim_pairs
+from liero_core.defaults import MATERIAL, DEFAULT_MATERIALS, ANIMATED_INDICES, expand_color_anim
 
 PROC_IMPORT = 'python-fu-liero-palette-import'
 PROC_EXPORT = 'python-fu-liero-palette-export-by-material'
@@ -45,11 +45,9 @@ PROC_VALIDATE = 'python-fu-liero-palette-validate'
 
 
 def palette_from_gimp_palette(gimp_palette, name=None):
-    """Copy a Gimp.Palette into a pure-python Palette."""
-    colors = []
-    for color in gimp_palette.get_colors():
-        r, g, b, _a = color.get_rgba()
-        colors.append((round(r * 255), round(g * 255), round(b * 255)))
+    """Copy a Gimp.Palette into a pure-python Palette (byte-exact sRGB)."""
+    from liero_core.gimp_colors import rgb8_from_color
+    colors = [rgb8_from_color(c) for c in gimp_palette.get_colors()]
     return Palette(name or gimp_palette.get_name(), colors).padded256()
 
 
@@ -67,17 +65,14 @@ def load_palette_for_gimp(path: Path) -> Palette:
     return load_palette(path).padded256()
 
 
-def make_gimp_palette(pal: Palette, table=None):
+def make_gimp_palette(pal: Palette, table=None, animated=None):
     """Create a new GIMP palette resource from a 256-color Palette.
 
-    Entry names carry the per-index material (e.g. ``042 ROCK``)."""
-    gimp_palette = Gimp.Palette.new(pal.name)
-    color = Gegl.Color.new('black')
-    for i, (r, g, b) in enumerate(pal.colors[:256]):
-        info = index_info(i, table)
-        color.set_rgba(r / 255.0, g / 255.0, b / 255.0, 1.0)
-        gimp_palette.add_entry(f"{i:03d} {info.material_name}", color)
-    return gimp_palette
+    Entry names carry the per-index material and animation flag
+    (e.g. ``129 UNDEF ANIM``). Colors are written byte-exact (never through
+    set_rgba, which is linear)."""
+    from liero_core.gimp_colors import make_gimp_palette as _make
+    return _make(pal.name, pal.colors, table=table, animated=animated)
 
 
 def export_material_palettes(pal: Palette, output_dir: Path, table=None):
@@ -130,11 +125,12 @@ if Gimp is not None:
         a dot marks animated indices.
         """
 
-        def __init__(self, colors, table, name, apply_default, can_apply):
+        def __init__(self, colors, table, name, apply_default, can_apply, animated=None):
             self.grid = PaletteGrid(colors, table,
                                     hover_cb=self._update_info,
                                     select_cb=self._update_info,
-                                    edit_cb=self._edit_color)
+                                    edit_cb=self._edit_color,
+                                    animated=animated)
 
             self.dialog = GimpUi.Dialog(title='Liero Palette Editor')
             self.dialog.add_button('_Cancel', Gtk.ResponseType.CANCEL)
@@ -174,9 +170,16 @@ if Gimp is not None:
             btn_box.pack_start(select, True, True, 0)
             side.pack_start(btn_box, False, False, 0)
 
+            row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             clear = Gtk.Button(label='Clear selection')
             clear.connect('clicked', self._on_clear)
-            side.pack_start(clear, False, False, 0)
+            row2.pack_start(clear, True, True, 0)
+            anim = Gtk.Button(label='Toggle animated')
+            anim.set_tooltip_text('Mark/unmark the selected indices as color-animated '
+                                  '(colorAnim); stored as ANIM in palette entry names')
+            anim.connect('clicked', self._on_toggle_animated)
+            row2.pack_start(anim, True, True, 0)
+            side.pack_start(row2, False, False, 0)
             side.pack_start(Gtk.Separator(), False, False, 4)
 
             side.pack_start(Gtk.Label(label='GIMP palette name:', xalign=0), False, False, 0)
@@ -263,6 +266,11 @@ if Gimp is not None:
             self.grid.clear_selection()
             self._update_info()
 
+        def _on_toggle_animated(self, _btn):
+            self.grid.animated.symmetric_difference_update(self.selected)
+            self._update_info()
+            self.grid.queue_draw()
+
         def _edit_color(self, idx):
             chooser = Gtk.ColorChooserDialog(title=f'Color for index {idx}',
                                              transient_for=self.dialog)
@@ -321,7 +329,7 @@ if Gimp is not None:
                 info = index_info(idx, self.table)
                 r, g, b = self.colors[idx]
                 flags = []
-                if info.animated:
+                if idx in self.grid.animated:
                     flags.append('animated')
                 if info.protected:
                     flags.append('protected')
@@ -332,6 +340,8 @@ if Gimp is not None:
             else:
                 lines.append('Hover a swatch for details.')
             lines.append(f"Selected: {len(self.selected)}")
+            anim_pairs = indices_to_anim_pairs(self.grid.animated)
+            lines.append(f"colorAnim: {anim_pairs}")
             self.info.set_text("\n".join(lines))
 
         def run(self):
@@ -342,6 +352,7 @@ if Gimp is not None:
                 result = {
                     'colors': list(self.colors),
                     'table': list(self.table),
+                    'animated': set(self.grid.animated),
                     'name': self.name_entry.get_text().strip(),
                     'apply': self.apply_check.get_active(),
                 }
@@ -487,21 +498,27 @@ if Gimp is not None:
                     path = Path(gfile.get_path())
                 pal = load_palette_for_gimp(path)
                 table = self._materials_table(config) or list(DEFAULT_MATERIALS)
+                animated = set(ANIMATED_INDICES)
+                if path.suffix.lower() == '.exe' or path.name.upper() == 'LIERO.EXE':
+                    pairs = [v for pair in read_exe_color_anim(path) for v in pair]
+                    animated = set(expand_color_anim(pairs))
                 name = config.get_property('palette-name').strip() or f"Liero {path.stem}"
                 apply_flag = config.get_property('apply-to-image')
                 can_apply = (image is not None
                              and image.get_base_type() == Gimp.ImageBaseType.INDEXED)
                 if run_mode == Gimp.RunMode.INTERACTIVE:
-                    editor = PaletteMaterialEditor(pal.colors, table, name, apply_flag, can_apply)
+                    editor = PaletteMaterialEditor(pal.colors, table, name, apply_flag,
+                                                   can_apply, animated=animated)
                     result = editor.run()
                     if result is None:
                         return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
                     pal = Palette(result['name'] or name, result['colors'])
                     table = result['table']
+                    animated = result['animated']
                     apply_flag = result['apply']
                 else:
                     pal = Palette(name, pal.colors)
-                gimp_palette = make_gimp_palette(pal, table)
+                gimp_palette = make_gimp_palette(pal, table, animated)
                 applied = ''
                 if apply_flag:
                     if can_apply:
@@ -509,7 +526,7 @@ if Gimp is not None:
                         # entries to keep indexed pixels distinguishable
                         unique = Palette(f"{pal.name} (applied)",
                                          uniquify_palette(pal.colors[:256]))
-                        tmp_palette = make_gimp_palette(unique, table)
+                        tmp_palette = make_gimp_palette(unique, table, animated)
                         image.set_palette(tmp_palette)
                         tmp_palette.delete()
                         Gimp.displays_flush()
