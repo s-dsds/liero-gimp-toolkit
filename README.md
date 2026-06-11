@@ -40,7 +40,7 @@ tests/test_core.py
 ## Status
 
 - **Palette management: functional.** Import opens a palette/material grid editor (see below), plus export by material, validate, and the CLI. Verified headlessly against Flatpak GIMP 3.2.4.
-- **Palette Lab: functional.** Live palette adjustment on indexed images: hue/saturation/brightness/contrast/temperature (+ colorize mode for grays and a make-gradient re-ramp tool) on a grid selection, with an in-dialog preview canvas that can also show any `.lev` map, `.wlsprt` sprite sheet or indexed `.png`. The palette source can be the image colormap or a GIMP palette (toolkit palettes carry materials in entry names). Float-precision pipeline; Commit chains adjustments; Apply writes back unique colors and keeps a GIMP palette. Worm indices locked by default.
+- **Palette Lab: functional.** Live palette adjustment on indexed images: hue/saturation/brightness/contrast/temperature (+ colorize mode for grays and a make-gradient re-ramp tool) on a grid selection, with an in-dialog preview canvas that can also show any `.lev` map, `.wlsprt` sprite sheet or indexed `.png`. The palette source can be the image colormap or a GIMP palette (toolkit palettes carry materials and `ANIM` flags in entry names). An *Animate colors* toggle cycles the colorAnim ranges in the preview like in game. Float-precision pipeline; Commit chains adjustments; *Apply to image* writes a unique-color colormap, *Apply + save palette* also keeps a GIMP palette. Worm indices locked by default.
 - **Material quantizer: draft shell.** The core quantizer is tested; GIMP pixel extraction is next.
 
 ### Supported palette sources
@@ -61,6 +61,7 @@ The CLI can also write `.lpl` files and patch a palette **into** a `.wlsprt` or 
 Interactive import opens a 16x16 swatch grid of the loaded palette:
 
 - each swatch shows a material badge (D, D2, R, B, BD, B2, S, W; blank = UNDEF) and a dot on animated indices; hover for index details
+- *Toggle animated* marks/unmarks the selection as color-animated; the info panel shows the resulting `colorAnim` pair list, and created palettes carry an `ANIM` token in entry names (e.g. `129 UNDEF ANIM`) so the flag survives round-trips; importing LIERO.EXE seeds the set from the exe's real colorAnim
 - click to select, Ctrl+click to toggle, Shift+click for ranges, or use *Select material* to grab a whole material at once
 - *Assign to selection* re-materials the selected indices on the fly
 - double-click a swatch to edit its color

@@ -13,8 +13,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk  # noqa: E402
 
-from .defaults import MATERIAL  # noqa: E402
-from .material import index_info  # noqa: E402
+from .defaults import MATERIAL, ANIMATED_INDICES  # noqa: E402
 
 CELL = 30  # swatch size in px
 
@@ -34,9 +33,11 @@ MATERIAL_BADGE = {
 class PaletteGrid:
     """Swatch grid state + widget. Access the Gtk widget via ``.widget``."""
 
-    def __init__(self, colors, table, hover_cb=None, select_cb=None, edit_cb=None):
+    def __init__(self, colors, table, hover_cb=None, select_cb=None, edit_cb=None,
+                 animated=None):
         self.colors = list(colors[:256])
         self.table = list(table[:256])
+        self.animated = set(ANIMATED_INDICES if animated is None else animated)
         self.selected = set()
         self.last_click = 0
         self._hover_cb = hover_cb
@@ -78,7 +79,7 @@ class PaletteGrid:
                 cr.set_font_size(9)
                 cr.move_to(x + 2, y + CELL - 3)
                 cr.show_text(badge)
-            if index_info(i, self.table).animated:
+            if i in self.animated:
                 cr.set_source_rgb(*fg)
                 cr.arc(x + CELL - 5, y + 5, 2.2, 0, 6.2832)
                 cr.fill()

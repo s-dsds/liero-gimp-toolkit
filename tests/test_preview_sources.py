@@ -6,7 +6,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from liero_core.defaults import DEFAULT_MATERIALS, MATERIAL
 from liero_core.formats import LEV_PIXELS, read_lev_pixels, read_wlsprt_sprites, wlsprt_sheet
-from liero_core.material import materials_from_entry_names
+from liero_core.material import (materials_from_entry_names, animated_from_entry_names,
+                                 indices_to_anim_pairs)
 
 SAMPLE_WLSPRT = Path("/home/qmdev/liero/wltools/wltools/bin/release/chickenfixed.wlsprt")
 SAMPLE_LEV = Path("/home/qmdev/liero/maps/ladofdef.lev")
@@ -46,6 +47,24 @@ def test_materials_from_entry_names():
 
 def test_materials_from_entry_names_rejects_foreign_palette():
     assert materials_from_entry_names(["Untitled"] * 256) is None
+
+
+def test_animated_from_entry_names():
+    names = [f"{i:03d} UNDEF" for i in range(256)]
+    names[129] = "129 UNDEF ANIM"
+    names[130] = "130 ROCK ANIM"
+    assert animated_from_entry_names(names) == {129, 130}
+    assert animated_from_entry_names([f"{i:03d} UNDEF" for i in range(256)]) is None
+    # materials parsing is not confused by the ANIM token
+    table = materials_from_entry_names(names)
+    assert table[130] == MATERIAL["ROCK"]
+
+
+def test_indices_to_anim_pairs():
+    assert indices_to_anim_pairs({129, 130, 131, 133, 134, 135, 136}) == \
+        [129, 131, 133, 136]
+    assert indices_to_anim_pairs({5}) == [5, 5]
+    assert indices_to_anim_pairs(set()) == []
 
 
 @pytest.mark.skipif(not SAMPLE_WLSPRT.exists(), reason="wltools samples absent")

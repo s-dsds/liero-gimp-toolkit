@@ -6,7 +6,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from liero_core.defaults import DEFAULT_MATERIALS, MATERIAL
-from liero_core.material import index_info, load_material_table, material_table_to_js, parse_material_text
+from liero_core.material import (index_info, load_material_table, material_table_to_js,
+                                 parse_material_text, animated_from_entry_names,
+                                 indices_to_anim_pairs)
 
 ROOM_MATERIAL_INIT = Path("/home/qmdev/liero/dock/room/_material_init.js")
 

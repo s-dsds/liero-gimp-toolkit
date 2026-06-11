@@ -172,6 +172,32 @@ def materials_from_entry_names(names: list[str]) -> list[int] | None:
     return table if hits >= len(names[:256]) / 2 else None
 
 
+def animated_from_entry_names(names: list[str]) -> set[int] | None:
+    """Recover the animated index set from GIMP palette entry names.
+
+    The toolkit marks animated entries with an ``ANIM`` token (``129 UNDEF
+    ANIM``). Returns None when no entry carries one.
+    """
+    anim = {i for i, name in enumerate(names[:256])
+            if name and 'ANIM' in (name or "").upper().split()}
+    return anim or None
+
+
+def indices_to_anim_pairs(indices) -> list[int]:
+    """Express an index set as a WebLiero colorAnim flat pair list
+    (consecutive runs become (from, to) pairs)."""
+    idxs = sorted(set(indices))
+    pairs = []
+    i = 0
+    while i < len(idxs):
+        j = i
+        while j + 1 < len(idxs) and idxs[j + 1] == idxs[j] + 1:
+            j += 1
+        pairs.extend((idxs[i], idxs[j]))
+        i = j + 1
+    return pairs
+
+
 def material_table_to_js(table: list[int], base: list[int] | None = None) -> str:
     """Render a material table as a paste-ready WLE room-script expression.
 
