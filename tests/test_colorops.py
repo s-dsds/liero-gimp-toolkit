@@ -89,20 +89,19 @@ def test_gradient_needs_three():
     assert gradient_palette_f(colors, [0, 1]) == colors
 
 
-def test_similar_colors_hue_family():
-    colors = [
-        (40, 40, 200),    # 0 dark blue
-        (120, 120, 255),  # 1 light blue (same hue family)
-        (200, 40, 40),    # 2 red
-        (128, 128, 128),  # 3 gray
-        (60, 60, 90),     # 4 dull blue (still bluish)
-        (8, 8, 12),       # 5 near-black with bluish tint -> excluded
-        (250, 250, 255),  # 6 near-white -> excluded
-    ]
-    sel = similar_color_indices(colors, (40, 40, 200))
-    assert 0 in sel and 1 in sel and 4 in sel
-    assert 2 not in sel and 3 not in sel
-    assert 5 not in sel and 6 not in sel
+def test_similar_colors_ramp_and_duplicates():
+    # mirror of the classic palette case: a tan ramp, its duplicate, a
+    # parallel brown ramp, plus junk that must stay out
+    colors = [(0, 0, 0)] * 16
+    colors[1:5] = [(120, 72, 52), (156, 120, 88), (196, 168, 124), (236, 216, 160)]  # ramp
+    colors[5:8] = [(156, 120, 88), (196, 168, 124), (236, 216, 160)]  # duplicate ramp
+    colors[8] = (124, 84, 48)     # parallel muted brown -> in
+    colors[9] = (252, 84, 84)     # vivid red -> out (hue + saturation)
+    colors[10] = (200, 100, 0)    # vivid orange -> out (saturation gap)
+    colors[11] = (128, 128, 128)  # gray -> out
+    sel = similar_color_indices(colors, 1)
+    assert {1, 2, 3, 4, 5, 6, 7, 8} <= sel
+    assert not ({9, 10, 11} & sel)
 
 
 def test_similar_colors_grays():
@@ -112,8 +111,16 @@ def test_similar_colors_grays():
         (20, 20, 20),     # 2 near-black (lightness too far)
         (128, 128, 255),  # 3 saturated blue
     ]
-    sel = similar_color_indices(colors, (128, 128, 128))
+    sel = similar_color_indices(colors, 0)
     assert sel == {0, 1}
+
+
+def test_detect_ramp_breaks_on_hue_jump():
+    from liero_core.colorops import detect_ramp
+    colors = [(148, 176, 0),   # olive (different hue family)
+              (120, 72, 52), (156, 120, 88), (196, 168, 124),  # tan ramp
+              (20, 200, 20)]   # green jump
+    assert detect_ramp(colors, 2) == [1, 2, 3]
 
 
 def test_uniquify_palette():

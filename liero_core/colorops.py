@@ -102,32 +102,78 @@ def gradient_palette_f(colors: Sequence[FColor], indices: Iterable[int],
     return out
 
 
-def similar_color_indices(colors: Sequence[Color], target: Color,
-                          hue_tol: float = 25 / 360.0, sat_floor: float = 0.12,
-                          light_tol: float = 0.35) -> set:
-    """Indices whose color belongs to the same family as ``target``.
+def _hls(rgb: Color):
+    r, g, b = [v / 255.0 for v in rgb]
+    return colorsys.rgb_to_hls(r, g, b)
 
-    A saturated target selects colors of a close hue within a lightness band
-    (a ramp counts as one family); near-black/near-white are excluded — their
-    hue is numerically defined but visually meaningless. A gray or extreme
-    (near-black/white) target selects similar low-saturation lightness.
+
+def _hue_diff(a: float, b: float) -> float:
+    d = abs(a - b)
+    return min(d, 1.0 - d)
+
+
+def _colors_close(a: Color, b: Color, hue_tol: float = 14 / 360.0,
+                  sat_tol: float = 0.25, light_tol: float = 0.16,
+                  sat_floor: float = 0.12) -> bool:
+    """Perceptual 'same family' test: close hue AND saturation AND lightness.
+
+    Grays (low saturation) only match other grays of similar lightness — a
+    muted tan never matches a vivid orange (saturation gap), nor a red
+    (hue gap), nor a near-black (lightness gap).
     """
-    tr, tg, tb = [v / 255.0 for v in target]
-    th, tl, ts = colorsys.rgb_to_hls(tr, tg, tb)
-    target_is_colorful = ts >= sat_floor and 0.04 < tl < 0.97
-    out = set()
-    for i, (r, g, b) in enumerate(colors):
-        h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
-        if target_is_colorful:
-            if s < sat_floor or not 0.05 < l < 0.97:
-                continue
-            hue_diff = abs(h - th)
-            hue_diff = min(hue_diff, 1.0 - hue_diff)
-            if hue_diff <= hue_tol and abs(l - tl) <= light_tol:
-                out.add(i)
-        else:
-            if (s < sat_floor or l <= 0.05 or l >= 0.97) and abs(l - tl) <= 0.20:
-                out.add(i)
+    ha, la, sa = _hls(a)
+    hb, lb, sb = _hls(b)
+    a_gray, b_gray = sa < sat_floor, sb < sat_floor
+    if a_gray != b_gray:
+        return False
+    if abs(la - lb) > light_tol:
+        return False
+    if a_gray:
+        return True
+    return _hue_diff(ha, hb) <= hue_tol and abs(sa - sb) <= sat_tol
+
+
+def detect_ramp(colors: Sequence[Color], index: int,
+                max_step: float = 100.0, hue_step_tol: float = 18 / 360.0) -> list:
+    """The consecutive index run forming a gradient/ramp around ``index``.
+
+    Neighbors belong to the ramp while the color step stays small and the hue
+    doesn't jump (hue drift along a ramp is normal; a jump means a new ramp).
+    """
+    def continuous(i, j):
+        a, b = colors[i], colors[j]
+        if sum((x - y) ** 2 for x, y in zip(a, b)) > max_step ** 2:
+            return False
+        ha, _la, sa = _hls(a)
+        hb, _lb, sb = _hls(b)
+        if min(sa, sb) >= 0.12 and _hue_diff(ha, hb) > hue_step_tol:
+            return False
+        return True
+
+    lo = hi = index
+    while lo - 1 >= 0 and continuous(lo - 1, lo):
+        lo -= 1
+    while hi + 1 < len(colors) and continuous(hi, hi + 1):
+        hi += 1
+    return list(range(lo, hi + 1))
+
+
+def similar_color_indices(colors: Sequence[Color], index: int) -> set:
+    """Indices similar to ``colors[index]``, ramp-aware.
+
+    First the ramp containing the index is detected (consecutive gradient),
+    then every palette color close to ANY ramp color joins the family — so
+    duplicate ramps and parallel ramps of the same tone are found, while
+    vivid/other-hue colors stay out.
+    """
+    ramp = detect_ramp(colors, index)
+    ramp_colors = [colors[i] for i in ramp]
+    out = set(ramp)
+    for i, c in enumerate(colors):
+        if i in out:
+            continue
+        if any(_colors_close(c, rc) for rc in ramp_colors):
+            out.add(i)
     return out
 
 
