@@ -117,6 +117,20 @@ def test_write_exe_palette(tmp_path):
     assert raw[:EXE_PALETTE_OFFSET] == bytes(EXE_PALETTE_OFFSET)  # code untouched
 
 
+def test_write_indexed_png(tmp_path):
+    PIL = pytest.importorskip("PIL.Image")
+    from liero_core.formats import write_indexed_png
+    out = tmp_path / "idx.png"
+    indices = bytes(range(256)) * 2
+    write_indexed_png(out, 32, 16, indices, rainbow())
+    img = PIL.open(out)
+    assert img.mode == "P" and img.size == (32, 16)
+    assert bytes(img.tobytes()) == indices
+    raw = img.getpalette()
+    got = [tuple(raw[i:i + 3]) for i in range(0, 768, 3)]
+    assert got == rainbow().colors
+
+
 def test_write_gpl_with_names(tmp_path):
     out = tmp_path / "named.gpl"
     write_gpl(out, "test", [(1, 2, 3), (4, 5, 6)], names=["000 ROCK", "001 UNDEF ANIM"])

@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Iterable, Sequence
 from .palette import Color, nearest_color_index
-from .defaults import DEFAULT_MATERIALS, PREFERRED_REPLACEMENT_INDICES, PROTECTED_BY_DEFAULT
+from .defaults import MATERIAL, DEFAULT_MATERIALS, PREFERRED_REPLACEMENT_INDICES, PROTECTED_BY_DEFAULT
 from .material import indices_for_material
 
 
@@ -75,7 +75,10 @@ def choose_palette_slots(
         new_palette.append((0, 0, 0))
 
     same_material = [i for i in indices_for_material(target_material, table) if i not in protected]
-    replacement_pool = [i for i in PREFERRED_REPLACEMENT_INDICES if i not in protected]
+    # only slots still UNDEF are up for grabs: a slot consumed by an earlier
+    # material in the same planning run has table[i] != UNDEF already
+    replacement_pool = [i for i in PREFERRED_REPLACEMENT_INDICES
+                        if i not in protected and table[i] == MATERIAL["UNDEF"]]
     used: set[int] = set()
     allowed: list[int] = []
 
@@ -100,3 +103,44 @@ def choose_palette_slots(
 
 def remap_pixels_to_indices(pixels: Iterable[Color], palette: Sequence[Color], allowed_indices: Sequence[int]) -> list[int]:
     return [nearest_color_index(c, palette, allowed_indices) for c in pixels]
+
+
+def plan_quantization(material_pixels: dict, material_counts: dict,
+                      base_palette: Sequence[Color],
+                      material_table: list[int] | None = None,
+                      protected: set | None = None):
+    """Plan a material-aware quantization.
+
+    material_pixels: {material_value: iterable of (r, g, b)}
+    material_counts: {material_value: target color count}
+
+    Returns (palette, table, assignments) where assignments maps each material
+    to its allowed palette indices. Materials are processed largest pixel set
+    first, so the 188-235 replacement pool goes where it is needed most.
+    """
+    palette = list(base_palette[:256])
+    while len(palette) < 256:
+        palette.append((0, 0, 0))
+    table = list(material_table or DEFAULT_MATERIALS)
+    assignments: dict[int, list[int]] = {}
+    order = sorted(material_pixels, key=lambda m: -len(material_pixels[m]))
+    for material in order:
+        pixels = material_pixels[material]
+        k = int(material_counts.get(material, 0))
+        if k <= 0 or not pixels:
+            continue
+        reps = median_cut(pixels, k)
+        allowed, palette, table = choose_palette_slots(
+            reps, palette, material, material_table=table, protected=protected)
+        assignments[material] = allowed
+    return palette, table, assignments
+
+
+def build_remap_lut(pixels: Iterable[Color], palette: Sequence[Color],
+                    allowed_indices: Sequence[int]) -> dict:
+    """Index lookup per distinct color (cheap remap of large pixel buffers)."""
+    lut = {}
+    for color in pixels:
+        if color not in lut:
+            lut[color] = nearest_color_index(color, palette, allowed_indices)
+    return lut

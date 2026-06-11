@@ -308,6 +308,36 @@ def write_lev_palette(src: str | Path, palette: Palette, dest: str | Path | None
     Path(dest or src).write_bytes(out)
 
 
+# --- indexed PNG writer (pure python, no Pillow) ------------------------------
+
+def write_indexed_png(path: str | Path, width: int, height: int,
+                      indices: bytes, palette: Palette) -> None:
+    """Write an 8-bit indexed (color type 3) PNG with an exact 256-entry PLTE.
+
+    Pure python (zlib + struct): no Pillow, and no GEGL color conversion —
+    every pixel byte is the palette index, untouched.
+    """
+    import struct
+    import zlib
+    if len(indices) != width * height:
+        raise ValueError(f"Need {width * height} index bytes, got {len(indices)}")
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)
+    plte = _palette_to_bytes(palette)
+    rows = b"".join(b"\x00" + indices[y * width:(y + 1) * width]
+                    for y in range(height))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", ihdr)
+           + chunk(b"PLTE", plte)
+           + chunk(b"IDAT", zlib.compress(rows, 9))
+           + chunk(b"IEND", b""))
+    Path(path).write_bytes(png)
+
+
 # --- dispatcher --------------------------------------------------------------
 
 def load_palette(path: str | Path) -> Palette:
