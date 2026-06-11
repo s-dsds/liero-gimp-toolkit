@@ -3,25 +3,20 @@
 Parked ideas, rough priorities. Things the user explicitly asked for are
 marked **(requested)**.
 
-## Project 3: material quantizer — DONE (v1), remaining ideas below
+## Material quantizer (v1 done) — next ideas
 
-The core (median-cut, slot allocation, remapping in `liero_core/quantizer.py`)
-is tested; the GIMP side is still the v0.1 skeleton. Plan:
-
-- Pixel extraction: reuse the Lab's proven trick — `get_thumbnail_data` at
-  full size + RGB→index/RGB collection per layer group (or Gegl buffers if
-  full resolution matters; thumbnail is capped, check size limits).
-- Scan layer tree for material groups (classifier exists: `classify_name`).
-- Review step before committing: show planned slot allocations on the palette
-  grid (reuse `PaletteGrid`), let the user override per material, show which
-  188-235 replacement slots get consumed.
-- Output: indexed image + forked palette named with materials + room-script
-  materials expression for WLE (the text-field widget pattern from the editor).
-- Per-material color counts: start from `examples/material_counts.json`, edit
-  in-dialog.
-- Later: k-means in OKLab, dithering (the sibling C plugin
-  `gimp-palette-quantize` has mature dithering — maybe just defer to it for
-  the remap step and only do slot planning here).
+- Nested groups: only top-level layers/groups are scanned; recurse with
+  per-subtree overrides if artwork gets deeper.
+- Dithering on the remap step (or defer to the sibling C plugin
+  `gimp-palette-quantize`, which has mature dithering — quantize there, then
+  bring the result in for slot planning only).
+- k-means in OKLab for representative colors (median-cut is fine but flat).
+- Per-material "allow recoloring existing same-material slots" option
+  (allocation policy step 2 from the spec — currently reuse-or-pool only).
+- Option to allocate from user-approved UNDEF indices beyond 188-235.
+- Show per-material quantization error (avg distance) in the stats.
+- Load a .lev/.wlsprt into the preview to compare the quantized output with
+  existing assets (the Studio's preview sources — share the pane).
 
 ## Palette Lab
 
