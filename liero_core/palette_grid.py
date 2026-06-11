@@ -166,7 +166,7 @@ class PaletteGrid:
     def _show_context_menu(self, idx, event):
         material = self.table[idx]
         mat_name = MATERIAL_NAMES.get(material, str(material))
-        similar = similar_color_indices(self.colors, self.colors[idx])
+        similar = similar_color_indices(self.colors, idx)
         items = [
             (f"Select similar colors ({len(similar)})",
              lambda *_: self._apply_menu_selection(similar, idx)),

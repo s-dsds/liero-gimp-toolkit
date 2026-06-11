@@ -320,11 +320,12 @@ class PaletteStudioDialog:
         self.name_entry = Gtk.Entry(text=name_hint or 'Liero palette')
         name_row.pack_start(self.name_entry, True, True, 0)
         left.pack_start(name_row, False, False, 0)
-        self.unique_check = Gtk.CheckButton(label='Unique colors when applying to image')
+        self.unique_check = Gtk.CheckButton(label='Unique colors when saving / applying')
         self.unique_check.set_active(True)
         self.unique_check.set_tooltip_text(
             'Nudge duplicate RGB values minimally so GIMP can tell colormap '
-            'entries apart (saved palettes always keep the raw colors)')
+            'entries apart — applied to BOTH the saved palette and the image '
+            'colormap so they stay identical')
         left.pack_start(self.unique_check, False, False, 0)
         write_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         write_btn = Gtk.Button(label='Write palette file…')
@@ -335,7 +336,7 @@ class PaletteStudioDialog:
         write_row.pack_start(write_btn, True, True, 0)
         split_btn = Gtk.Button(label='Export by material…')
         split_btn.set_tooltip_text(
-            'Write one .gpl per material (pick which) into a folder')
+            'Create one GIMP palette per material (pick which)')
         split_btn.connect('clicked', self._on_export_materials)
         write_row.pack_start(split_btn, True, True, 0)
         left.pack_start(write_row, False, False, 0)
@@ -405,6 +406,11 @@ class PaletteStudioDialog:
                                   'selected colors, interpolate the rest')
         gradient.connect('clicked', self._on_gradient)
         btn_row.pack_start(gradient, True, True, 0)
+        unique_btn = Gtk.Button(label='Make unique')
+        unique_btn.set_tooltip_text('Uniquify the working palette right now '
+                                    '(nudges visible on the grid)')
+        unique_btn.connect('clicked', self._on_make_unique)
+        btn_row.pack_start(unique_btn, True, True, 0)
         side.pack_start(btn_row, False, False, 0)
 
         btn_row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -879,67 +885,57 @@ class PaletteStudioDialog:
             traceback.print_exc()
             self.info.set_text(f"Write failed: {exc}")
 
-    def _export_material_files(self, folder: Path, selection: list, full: bool):
-        """Write the chosen per-material .gpl files (entry names keep the
+    def _export_material_palettes(self, selection: list, full: bool):
+        """Create the chosen per-material GIMP palettes (entry names keep the
         original palette indices for traceability)."""
         colors = quantize(self.preview)
         base_name = self._palette_name()
-        written = []
+        created = []
         if full:
-            out = folder / f"{base_name}-full.gpl"
-            write_gpl(out, f"{base_name}-full", colors, names=self._entry_names())
-            written.append(out.name)
+            make_gimp_palette(f"{base_name}-full", colors,
+                              table=self.table, animated=self.animated)
+            created.append(f"{base_name}-full")
         for mat_name in selection:
             idxs = indices_for_material(MATERIAL[mat_name], self.table)
             if not idxs:
                 continue
-            out = folder / f"{base_name}-{mat_name}.gpl"
-            write_gpl(out, f"{base_name}-{mat_name}",
-                      [colors[i] for i in idxs],
-                      names=[f"{i:03d}" + (' ANIM' if i in self.animated else '')
-                             for i in idxs])
-            written.append(out.name)
-        return written
+            pal = Gimp.Palette.new(f"{base_name}-{mat_name}")
+            for i in idxs:
+                pal.add_entry(f"{i:03d}" + (' ANIM' if i in self.animated else ''),
+                              color_from_rgb8(colors[i]))
+            created.append(f"{base_name}-{mat_name}")
+        return created
 
     def _on_export_materials(self, _btn):
-        chooser = Gtk.FileChooserDialog(title='Export material palettes to folder',
-                                        transient_for=self.dialog,
-                                        action=Gtk.FileChooserAction.SELECT_FOLDER)
-        chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
-        chooser.add_button('_Export', Gtk.ResponseType.OK)
-        # sub-palette picker lives inside the folder chooser
-        extra = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        extra.pack_start(Gtk.Label(label='Sub-palettes to export:', xalign=0),
-                         False, False, 0)
-        grid_box = Gtk.FlowBox()
-        grid_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        grid_box.set_max_children_per_line(5)
+        picker = Gtk.Dialog(title='Export material palettes',
+                            transient_for=self.dialog)
+        picker.add_button('_Cancel', Gtk.ResponseType.CANCEL)
+        picker.add_button('_Export', Gtk.ResponseType.OK)
+        box = picker.get_content_area()
+        box.set_spacing(4)
+        box.set_property('margin', 12)
+        box.add(Gtk.Label(label='Create these GIMP palettes:', xalign=0))
         full_check = Gtk.CheckButton(label='Full palette')
         full_check.set_active(True)
-        grid_box.add(full_check)
+        box.add(full_check)
         checks = {}
         for mat_name, mat_value in MATERIAL.items():
             count = len(indices_for_material(mat_value, self.table))
-            check = Gtk.CheckButton(label=f"{mat_name} ({count})")
+            check = Gtk.CheckButton(label=f"{mat_name} ({count} indices)")
             check.set_active(count > 0)
             check.set_sensitive(count > 0)
             checks[mat_name] = check
-            grid_box.add(check)
-        extra.pack_start(grid_box, False, False, 0)
-        extra.show_all()
-        chooser.set_extra_widget(extra)
-        folder = None
-        if chooser.run() == Gtk.ResponseType.OK:
-            folder = Path(chooser.get_filename())
-            selection = [n for n, c in checks.items() if c.get_active()]
-            full = full_check.get_active()
-        chooser.destroy()
-        if folder is None:
+            box.add(check)
+        picker.show_all()
+        ok = picker.run() == Gtk.ResponseType.OK
+        selection = [n for n, c in checks.items() if c.get_active()]
+        full = full_check.get_active()
+        picker.destroy()
+        if not ok:
             return
         try:
-            written = self._export_material_files(folder, selection, full)
-            Gimp.message(f"Wrote {len(written)} palettes to {folder}:\n"
-                         + "\n".join(written))
+            created = self._export_material_palettes(selection, full)
+            Gimp.message("Created GIMP palettes:\n" + "\n".join(created))
         except Exception as exc:
             traceback.print_exc()
             self.info.set_text(f"Export failed: {exc}")
@@ -983,6 +979,11 @@ class PaletteStudioDialog:
         self.base = gradient_palette_f(self.base, self.grid.selected)
         self._recompute()
 
+    def _on_make_unique(self, _btn):
+        self.base = to_float(uniquify_palette(quantize(self.preview)))
+        self._reset_sliders_silent()
+        self._recompute()
+
     def _on_reset_sliders(self, _btn):
         self._reset_sliders_silent()
         self._recompute()
@@ -1019,24 +1020,26 @@ class PaletteStudioDialog:
         try:
             while True:
                 response = self.dialog.run()
-                raw = quantize(self.preview)
+                # one set of output colors for BOTH saving and applying, so the
+                # saved palette and the image colormap stay identical
+                out_colors = quantize(self.preview)
+                if self.unique_check.get_active():
+                    out_colors = uniquify_palette(out_colors)
                 if response == self.RESP_SAVE_PALETTE:
-                    make_gimp_palette(self._palette_name(), raw,
+                    make_gimp_palette(self._palette_name(), out_colors,
                                       table=self.table, animated=self.animated)
                     Gimp.message(f"Saved palette '{self._palette_name()}'.")
                     continue  # stay open: saving is not closing
                 if response in (self.RESP_APPLY_IMAGE, self.RESP_APPLY_BOTH) \
                         and self.can_apply:
-                    apply_colors = (uniquify_palette(raw)
-                                    if self.unique_check.get_active() else raw)
-                    tmp = make_gimp_palette(f"{self._palette_name()} (applied)",
-                                            apply_colors,
+                    keep = response == self.RESP_APPLY_BOTH
+                    pal_name = self._palette_name() if keep \
+                        else f"{self._palette_name()} (applied)"
+                    pal = make_gimp_palette(pal_name, out_colors,
                                             table=self.table, animated=self.animated)
-                    self.image.set_palette(tmp)
-                    tmp.delete()
-                    if response == self.RESP_APPLY_BOTH:
-                        make_gimp_palette(self._palette_name(), raw,
-                                          table=self.table, animated=self.animated)
+                    self.image.set_palette(pal)
+                    if not keep:
+                        pal.delete()
                     Gimp.displays_flush()
                     applied = True
                 break
