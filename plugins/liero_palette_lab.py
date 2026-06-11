@@ -67,32 +67,39 @@ def colors_from_gimp_palette(gimp_palette):
     return out[:256]
 
 
-def map_rgb_to_indices(data, bpp, palette_colors):
-    """Map raw RGB(A) bytes to palette indices (exact first, then nearest)."""
-    lookup = {}
-    for i, c in enumerate(palette_colors):
-        lookup.setdefault(tuple(c), i)
-    cache = dict(lookup)
+def subsample_indices(width, height, data, max_w, max_h):
+    """Nearest-neighbor downscale of an index buffer (never blend indices)."""
+    scale = min(1.0, max_w / width, max_h / height)
+    if scale >= 1.0:
+        return width, height, data
+    nw, nh = max(1, int(width * scale)), max(1, int(height * scale))
+    out = bytearray(nw * nh)
+    for y in range(nh):
+        row = int(y / scale) * width
+        base = y * nw
+        for x in range(nw):
+            out[base + x] = data[row + int(x / scale)]
+    return nw, nh, bytes(out)
 
-    def nearest(rgb):
-        r, g, b = rgb
-        best, best_d = 0, 1 << 30
-        for i, (pr, pg, pb) in enumerate(palette_colors):
-            d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2
-            if d < best_d:
-                best, best_d = i, d
-        return best
 
-    out = bytearray(len(data) // bpp)
-    for p in range(len(out)):
-        o = p * bpp
-        rgb = (data[o], data[o + 1], data[o + 2])
-        idx = cache.get(rgb)
-        if idx is None:
-            idx = nearest(rgb)
-            cache[rgb] = idx
-        out[p] = idx
-    return bytes(out)
+def indices_from_image(image):
+    """True palette indices of an indexed image, via the GEGL buffer.
+
+    RGB round-trips are NOT usable here: classic palettes carry duplicate RGB
+    values across materials, so colors don't identify indices.
+    """
+    dup = image.duplicate()
+    try:
+        layer = dup.flatten()
+        w, h = layer.get_width(), layer.get_height()
+        rect = Gegl.Rectangle.new(0, 0, w, h)
+        data = bytes(layer.get_buffer().get(rect, 1.0, None, Gegl.AbyssPolicy.CLAMP))
+    finally:
+        dup.delete()
+    bpp = len(data) // (w * h)
+    if bpp > 1:  # indexed+alpha safety: keep the index plane
+        data = data[::bpp]
+    return subsample_indices(w, h, data, PREVIEW_W, PREVIEW_H)
 
 
 if Gimp is not None:
@@ -275,12 +282,7 @@ if Gimp is not None:
         # -- preview sources ----------------------------------------------------
 
         def _load_preview_from_image(self, image):
-            w0, h0 = image.get_width(), image.get_height()
-            scale = min(1.0, PREVIEW_W / w0, PREVIEW_H / h0)
-            w, h = max(1, int(w0 * scale)), max(1, int(h0 * scale))
-            data, w, h, bpp = image.get_thumbnail_data(w, h)
-            base8 = quantize(self.base)
-            self.canvas.set_pixels(w, h, map_rgb_to_indices(bytes(data.get_data()), bpp, base8))
+            self.canvas.set_pixels(*indices_from_image(image))
 
         def _on_load_preview(self, _btn):
             chooser = Gtk.FileChooserDialog(title='Load preview source',
@@ -318,13 +320,7 @@ if Gimp is not None:
                 try:
                     if img.get_base_type() != Gimp.ImageBaseType.INDEXED:
                         raise ValueError('PNG is not indexed')
-                    own_pal = colors_from_gimp_palette(img.get_palette())
-                    w0, h0 = img.get_width(), img.get_height()
-                    scale = min(1.0, PREVIEW_W / w0, PREVIEW_H / h0)
-                    w, h = max(1, int(w0 * scale)), max(1, int(h0 * scale))
-                    data, w, h, bpp = img.get_thumbnail_data(w, h)
-                    self.canvas.set_pixels(
-                        w, h, map_rgb_to_indices(bytes(data.get_data()), bpp, own_pal))
+                    self.canvas.set_pixels(*indices_from_image(img))
                 finally:
                     img.delete()
             else:
