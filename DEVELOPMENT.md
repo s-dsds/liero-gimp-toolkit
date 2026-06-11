@@ -49,6 +49,15 @@ on Linux). Read this before touching the GIMP-side code.
   time: a non-existent folder → `CALLING_ERROR` (status 1).
 - `image.get_thumbnail_data(w, h)` → `(GLib.Bytes, w, h, bpp)`; it preserves
   aspect ratio itself (returned w/h differ from requested) and bpp is often 4.
+- **Never reconstruct indices from RGB**: classic colormaps carry duplicate
+  RGB values across materials (a real map showed 48 duplicate entries), so
+  color does not identify the index — the Lab preview misattributed pixels
+  this way once. Read true indices from the drawable:
+  `layer.get_buffer().get(rect, 1.0, None, Gegl.AbyssPolicy.CLAMP)` on an
+  indexed flattened layer returns 1 byte/pixel index data (pass format
+  `None` = native; the format property is a Babl pointer you can't pass).
+  Downscale index buffers yourself with nearest-neighbor — any interpolating
+  scaler blends index *numbers*.
 - `palette.get_entry_name(i)` returns `(bool, str)`.
 - Override `do_set_i18n(self, name): return False` or every plug-in logs
   missing-locale warnings.
