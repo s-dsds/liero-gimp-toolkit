@@ -362,10 +362,6 @@ class PaletteStudioDialog:
             extra_row.pack_start(btn, True, True, 0)
         side.pack_start(extra_row, False, False, 0)
 
-        self.lock_worm = Gtk.CheckButton(label='Lock worm indices')
-        self.lock_worm.set_active(True)
-        self.lock_worm.connect('toggled', lambda _b: self._on_lock_changed())
-        side.pack_start(self.lock_worm, False, False, 0)
         side.pack_start(Gtk.Separator(), False, False, 4)
 
         self.adjustments = {}
@@ -471,7 +467,6 @@ class PaletteStudioDialog:
             self.source_combo.set_active_id('__image__')
         if initial_file is not None:
             self._load_file(Path(initial_file))
-        self._sync_locked()
         self._refresh_text()
         self._recompute()
         self._update_info()
@@ -487,7 +482,6 @@ class PaletteStudioDialog:
         self._pristine = (list(base8), list(self.table), set(self.animated))
         self.grid.table = list(self.table)
         self.grid.animated = set(self.animated)
-        self._sync_locked()
         self._reset_sliders_silent()
         self._refresh_text()
         self._recompute()
@@ -648,19 +642,6 @@ class PaletteStudioDialog:
 
     # ---- transform pipeline --------------------------------------------------------
 
-    def _locked(self):
-        if self.lock_worm.get_active():
-            return {i for i, m in enumerate(self.table) if m == MATERIAL['WORM']}
-        return set()
-
-    def _sync_locked(self):
-        self.grid.locked = self._locked()
-        self.grid.queue_draw()
-
-    def _on_lock_changed(self):
-        self._sync_locked()
-        self._recompute()
-
     def _slider_kwargs(self):
         kwargs = {s[0]: self.adjustments[s[0]].get_value() for s in SLIDERS}
         if self.colorize.get_active():
@@ -670,7 +651,6 @@ class PaletteStudioDialog:
 
     def _recompute(self):
         self.preview = adjusted_palette_f(self.base, self.grid.selected,
-                                          locked=self._locked(),
                                           **self._slider_kwargs())
         self._render_preview()
         self._update_info()
@@ -757,7 +737,6 @@ class PaletteStudioDialog:
         for i in self.grid.selected:
             self.table[i] = value
         self.grid.table = list(self.table)
-        self._sync_locked()
         self._refresh_text()
         self._recompute()
 
@@ -813,7 +792,6 @@ class PaletteStudioDialog:
             self.info.set_text(f"Material text error: {exc}")
             return
         self.grid.table = list(self.table)
-        self._sync_locked()
         self._recompute()
 
     def _on_save_materials(self, _btn):
@@ -852,8 +830,7 @@ class PaletteStudioDialog:
         self._recompute()
 
     def _on_gradient(self, _btn):
-        self.base = gradient_palette_f(self.base, self.grid.selected,
-                                       locked=self._locked())
+        self.base = gradient_palette_f(self.base, self.grid.selected)
         self._recompute()
 
     def _on_reset_sliders(self, _btn):
@@ -873,17 +850,11 @@ class PaletteStudioDialog:
             flags = []
             if idx in self.animated:
                 flags.append('animated')
-            if idx in self.grid.locked:
-                flags.append('locked')
             lines.append(f"Index {idx}  #{r:02x}{g:02x}{b:02x}  {info.material_name}"
                          + (f"  [{', '.join(flags)}]" if flags else ''))
         else:
             lines.append('Hover a swatch for details.')
-        n_locked = len(self.grid.selected & self.grid.locked)
-        sel_line = f"Selected: {len(self.grid.selected)}"
-        if n_locked:
-            sel_line += f"  ({n_locked} locked — not affected)"
-        lines.append(sel_line)
+        lines.append(f"Selected: {len(self.grid.selected)}")
         lines.append(f"colorAnim: {indices_to_anim_pairs(self.animated)}")
         self.info.set_text("\n".join(lines))
 
