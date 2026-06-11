@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from liero_core.palette import Palette
 from liero_core.formats import (
+    EXE_PALETTE_OFFSET,
     LEV_PIXELS,
     POWERLEVEL_MAGIC,
     default_palette,
@@ -16,10 +17,12 @@ from liero_core.formats import (
     read_lev_palette,
     read_lpl,
     read_wlsprt_palette,
+    write_exe_palette,
     write_lev_palette,
     write_lpl,
     write_wlsprt_palette,
 )
+from liero_core.palette import read_gpl, write_gpl
 from liero_core.defaults import DEFAULT_MATERIALS, DEFAULT_COLOR_ANIM_RANGES
 
 LIERO_EXE = Path("/home/qmdev/liero/lierov133winxp/LIERO.EXE")
@@ -100,6 +103,26 @@ def test_load_palette_dispatch(tmp_path):
     junk.write_bytes(b"not a palette at all")
     with pytest.raises(ValueError):
         load_palette(junk)
+
+
+def test_write_exe_palette(tmp_path):
+    fake_exe = tmp_path / "LIERO.EXE"
+    fake_exe.write_bytes(bytes(EXE_PALETTE_OFFSET + 768 + 32))
+    write_exe_palette(fake_exe, rainbow())
+    got = read_exe_palette(fake_exe)
+    # 6-bit storage quantizes to multiples of 4
+    expected = [(r >> 2 << 2, g >> 2 << 2, b >> 2 << 2) for r, g, b in rainbow().colors]
+    assert got.colors == expected
+    raw = fake_exe.read_bytes()
+    assert raw[:EXE_PALETTE_OFFSET] == bytes(EXE_PALETTE_OFFSET)  # code untouched
+
+
+def test_write_gpl_with_names(tmp_path):
+    out = tmp_path / "named.gpl"
+    write_gpl(out, "test", [(1, 2, 3), (4, 5, 6)], names=["000 ROCK", "001 UNDEF ANIM"])
+    text = out.read_text()
+    assert "000 ROCK" in text and "001 UNDEF ANIM" in text
+    assert read_gpl(out).colors == [(1, 2, 3), (4, 5, 6)]
 
 
 # --- integration against real local files (skipped elsewhere) ---------------

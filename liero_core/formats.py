@@ -238,6 +238,15 @@ def read_exe_palette(path: str | Path) -> Palette:
     return Palette(path.stem, _colors_from_bytes(block, six_bit=True))
 
 
+def write_exe_palette(src: str | Path, palette: Palette, dest: str | Path | None = None) -> None:
+    """Patch a palette into a decompressed LIERO.EXE (6-bit, code untouched)."""
+    src = Path(src)
+    raw = bytearray(src.read_bytes())
+    _check_exe(raw, src)
+    raw[EXE_PALETTE_OFFSET:EXE_PALETTE_OFFSET + 768] = _palette_to_bytes(palette, six_bit=True)
+    Path(dest or src).write_bytes(bytes(raw))
+
+
 def read_exe_color_anim(path: str | Path) -> List[Tuple[int, int]]:
     """The 4 animated (from, to) index ranges stored in the exe."""
     raw = Path(path).read_bytes()
