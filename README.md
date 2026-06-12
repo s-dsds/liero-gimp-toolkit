@@ -93,16 +93,36 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest pillow
 
 (Pillow is only needed for indexed PNG palette import.)
 
-## Install GIMP plug-ins on Linux
+## Install GIMP plug-ins
 
-Works with native or Flatpak GIMP 3.x (tested against Flatpak GIMP 3.2.4):
+The plug-ins are pure Python and run on GIMP's bundled Python — no
+compilation on any platform. Restart GIMP afterwards and look for the
+`Liero` menu.
+
+**Linux** (native or Flatpak GIMP 3.x; tested against Flatpak GIMP 3.2.4):
 
 ```bash
-cd liero-gimp-toolkit
 ./install-linux-user.sh
 ```
 
-Restart GIMP and look for the `Liero` menu.
+**Windows** (GIMP 3.x; copies to `%APPDATA%\GIMP\<ver>\plug-ins`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-windows-user.ps1
+```
+
+**macOS** (GIMP 3.x; copies to `~/Library/Application Support/GIMP/<ver>/plug-ins`):
+
+```bash
+./install-macos-user.sh
+```
+
+## CI / packaging
+
+`.gitlab-ci.yml` byte-compiles and tests the toolkit on Python 3.10–3.13
+(the versions GIMP 3.x bundles across platforms) and packages per-platform
+zips (`tools/package.py` → `dist/`). Windows/macOS test jobs are manual
+(SaaS runner cost); retag for self-hosted runners.
 
 To verify registration without opening the UI (Flatpak):
 
