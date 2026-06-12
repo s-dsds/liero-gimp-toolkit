@@ -1,0 +1,77 @@
+# CI for liero-gimp-toolkit.
+#
+# The toolkit is pure Python (GIMP 3 plug-ins) - nothing compiles in the C
+# sense. "Build" here means:
+#   1. byte-compile + run the test suite across the Python versions that
+#      GIMP 3.x bundles on the various platforms (3.10 - 3.13),
+#   2. package per-platform zips (same code + that platform's installer).
+#
+# Linux jobs run on any gitlab.com shared runner (or any docker runner).
+# The Windows/macOS jobs validate the code under those OSes' Pythons; they
+# are manual + allow_failure because gitlab.com SaaS Windows runners are slow
+# and macOS runners require a Premium/Ultimate plan. On a self-hosted GitLab,
+# adjust the `tags:` to your runners.
+
+stages:
+  - test
+  - package
+
+.test-linux:
+  stage: test
+  image: python:${PY}-slim
+  script:
+    # byte-compile everything a GIMP would load (the actual "compile" step)
+    - python -m compileall -q liero_core plugins liero_palette_cli.py tools
+    - pip install --quiet pytest pillow
+    - python -m pytest tests -q
+
+test:linux:
+  extends: .test-linux
+  parallel:
+    matrix:
+      - PY: ['3.10', '3.11', '3.12', '3.13']
+
+# Optional: same checks under Windows Python (paths, line endings...).
+test:windows:
+  stage: test
+  tags:
+    - saas-windows-medium-amd64
+  rules:
+    - when: manual
+      allow_failure: true
+  script:
+    - choco install -y python312 --no-progress
+    - $py = 'C:\Python312\python.exe'
+    - '& $py -m compileall -q liero_core plugins liero_palette_cli.py'
+    - '& $py -m pip install --quiet pytest pillow'
+    - '& $py -m pytest tests -q'
+    # the installer must at least parse
+    - powershell -ExecutionPolicy Bypass -Command "[scriptblock]::Create((Get-Content -Raw install-windows-user.ps1)) | Out-Null"
+
+# Optional: same checks under macOS (requires GitLab Premium SaaS macOS
+# runners, or a self-hosted mac runner - retag accordingly).
+test:macos:
+  stage: test
+  tags:
+    - saas-macos-medium-m1
+  image: macos-14-xcode-15
+  rules:
+    - when: manual
+      allow_failure: true
+  script:
+    - python3 -m compileall -q liero_core plugins liero_palette_cli.py
+    - python3 -m pip install --quiet pytest pillow
+    - python3 -m pytest tests -q
+    - bash -n install-macos-user.sh
+
+package:
+  stage: package
+  image: python:3.12-slim
+  needs: ['test:linux']
+  script:
+    - python tools/package.py "${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+  artifacts:
+    name: liero-gimp-toolkit-$CI_COMMIT_SHORT_SHA
+    paths:
+      - dist/
+    expire_in: 3 months
