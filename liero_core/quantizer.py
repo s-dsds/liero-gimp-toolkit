@@ -62,19 +62,24 @@ def choose_palette_slots(
     material_table: list[int] | None = None,
     protected: set[int] | None = None,
     max_reuse_error: int = 18 * 18 * 3,
+    reuse_materials: set[int] | None = None,
 ) -> tuple[list[int], list[Color], list[int]]:
     """Assign representative colors to palette indices.
 
     Returns (allowed_indices, new_palette, new_material_table).
-    Reuses same-material colors if close; otherwise allocates from 188-235 first.
+    Reuses colors of ``reuse_materials`` (default: just the target) if close;
+    otherwise allocates from 188-235 first. Newly allocated slots are tagged
+    ``target_material``.
     """
     table = list(material_table or DEFAULT_MATERIALS)
     protected = set(PROTECTED_BY_DEFAULT if protected is None else protected)
+    reuse = set(reuse_materials or {target_material})
     new_palette = list(base_palette[:256])
     while len(new_palette) < 256:
         new_palette.append((0, 0, 0))
 
-    same_material = [i for i in indices_for_material(target_material, table) if i not in protected]
+    same_material = [i for i, m in enumerate(table)
+                     if m in reuse and i not in protected]
     # only slots still UNDEF are up for grabs: a slot consumed by an earlier
     # material in the same planning run has table[i] != UNDEF already
     replacement_pool = [i for i in PREFERRED_REPLACEMENT_INDICES
@@ -84,18 +89,23 @@ def choose_palette_slots(
 
     for color in representatives:
         chosen = None
+        from_pool = False
         if same_material:
             nearest = min((i for i in same_material if i not in used), key=lambda i: _dist2(color, new_palette[i]), default=None)
             if nearest is not None and _dist2(color, new_palette[nearest]) <= max_reuse_error:
                 chosen = nearest
         if chosen is None:
             chosen = next((i for i in replacement_pool if i not in used), None)
+            from_pool = chosen is not None
         if chosen is None:
             chosen = next((i for i in same_material if i not in used), None)
         if chosen is None:
             raise RuntimeError(f"No free palette slot for material {target_material}")
         new_palette[chosen] = color
-        table[chosen] = target_material
+        if from_pool:
+            # reused/recolored slots keep their existing material tag (matters
+            # when reusing across a material group, e.g. DIRT + DIRT_2)
+            table[chosen] = target_material
         used.add(chosen)
         allowed.append(chosen)
     return allowed, new_palette, table
@@ -108,31 +118,41 @@ def remap_pixels_to_indices(pixels: Iterable[Color], palette: Sequence[Color], a
 def plan_quantization(material_pixels: dict, material_counts: dict,
                       base_palette: Sequence[Color],
                       material_table: list[int] | None = None,
-                      protected: set | None = None):
+                      protected: set | None = None,
+                      selectors: dict | None = None):
     """Plan a material-aware quantization.
 
-    material_pixels: {material_value: iterable of (r, g, b)}
-    material_counts: {material_value: target color count}
+    material_pixels: {key: iterable of (r, g, b)}
+    material_counts: {key: target color count}
+    selectors: {key: (target_material, reuse_materials_set)} — lets a key
+        cover several materials (e.g. DIRT + DIRT_2 drawn as one group):
+        existing slots of any member are reusable, new slots get tagged
+        ``target_material``. Default for an int key: (key, {key}).
 
-    Returns (palette, table, assignments) where assignments maps each material
-    to its allowed palette indices. Materials are processed largest pixel set
-    first, so the 188-235 replacement pool goes where it is needed most.
+    Returns (palette, table, assignments) where assignments maps each key to
+    its allowed palette indices. Keys are processed largest pixel set first,
+    so the 188-235 replacement pool goes where it is needed most.
     """
     palette = list(base_palette[:256])
     while len(palette) < 256:
         palette.append((0, 0, 0))
     table = list(material_table or DEFAULT_MATERIALS)
-    assignments: dict[int, list[int]] = {}
+    assignments: dict = {}
     order = sorted(material_pixels, key=lambda m: -len(material_pixels[m]))
-    for material in order:
-        pixels = material_pixels[material]
-        k = int(material_counts.get(material, 0))
+    for key in order:
+        pixels = material_pixels[key]
+        k = int(material_counts.get(key, 0))
         if k <= 0 or not pixels:
             continue
+        if selectors and key in selectors:
+            target, reuse = selectors[key]
+        else:
+            target, reuse = key, {key}
         reps = median_cut(pixels, k)
         allowed, palette, table = choose_palette_slots(
-            reps, palette, material, material_table=table, protected=protected)
-        assignments[material] = allowed
+            reps, palette, target, material_table=table, protected=protected,
+            reuse_materials=set(reuse))
+        assignments[key] = allowed
     return palette, table, assignments
 
 
