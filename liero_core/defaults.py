@@ -23,11 +23,13 @@ MATERIAL = {
 MATERIAL_NAMES = {v: k for k, v in MATERIAL.items()}
 
 # Frequently co-edited material families (selectable together in the UIs).
+# Members are ordered: the FIRST is the group's primary material — newly
+# allocated palette slots get tagged with it when quantizing a whole group.
 MATERIAL_GROUPS = {
-    "DIRTS": ("Dirts (DIRT + DIRT_2)", frozenset({1, 2})),
-    "BACKGROUNDS": ("Backgrounds (BG + BG_SEESHADOW)", frozenset({8, 24})),
-    "BG_DIRTS": ("BG + BG dirts", frozenset({8, 9, 10})),
-    "ALL_DIRTS": ("All dirts (incl. BG dirts)", frozenset({1, 2, 9, 10})),
+    "DIRTS": ("Dirts (DIRT + DIRT_2)", (1, 2)),
+    "BACKGROUNDS": ("Backgrounds (BG + BG_SEESHADOW)", (8, 24)),
+    "BG_DIRTS": ("BG + BG dirts", (8, 9, 10)),
+    "ALL_DIRTS": ("All dirts (incl. BG dirts)", (1, 2, 9, 10)),
 }
 
 # Verified byte-for-byte against both LIERO.EXE 1.33 (bitplanes at 0x1C2E0 /

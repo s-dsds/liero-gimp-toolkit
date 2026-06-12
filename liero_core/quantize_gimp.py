@@ -19,7 +19,7 @@ gi.require_version('Gimp', '3.0')
 gi.require_version('Gegl', '0.4')
 from gi.repository import Gimp, Gegl, Gio  # noqa: E402
 
-from .defaults import DEFAULT_MATERIALS, MATERIAL, MATERIAL_NAMES, PROTECTED_BY_DEFAULT  # noqa: E402
+from .defaults import DEFAULT_MATERIALS, MATERIAL, MATERIAL_NAMES, MATERIAL_GROUPS, PROTECTED_BY_DEFAULT  # noqa: E402
 from .formats import write_indexed_png  # noqa: E402
 from .material import classify_name  # noqa: E402
 from .palette import Palette, nearest_color_index  # noqa: E402
@@ -54,29 +54,33 @@ def compute_quantization(image, layer_materials, counts, base_palette,
                          material_table=None, protected=None, uniquify=True):
     """Run the full quantization plan over an image's material layers.
 
-    layer_materials: [(layer, material_value)] — already filtered/overridden.
-    counts: {material_value: target color count}
+    layer_materials: [(layer, key)] — key is a material value or 'group:GID'
+        (several materials drawn as one group, e.g. DIRT + DIRT_2).
+    counts: {key: target color count}
 
     Returns a plan dict: palette, table, assignments, indices (bytes, full
     canvas, 0 = untouched/UNDEF background), width, height, stats.
     """
     width, height = image.get_width(), image.get_height()
-    sources = []          # (layer order kept), with raw pixel data
-    material_colors = {}  # material -> Counter of opaque colors
-    for layer, material in layer_materials:
+    sources = []        # (layer order kept), with raw pixel data
+    key_colors = {}     # key -> Counter of opaque colors
+    selectors = {}
+    for layer, key in layer_materials:
+        _label, target, members = resolve_selection_key(key)
+        selectors[key] = (target, set(members))
         off_x, off_y, w, h, data = read_layer_rgba(layer)
-        sources.append((material, off_x, off_y, w, h, data))
-        counter = material_colors.setdefault(material, Counter())
+        sources.append((key, off_x, off_y, w, h, data))
+        counter = key_colors.setdefault(key, Counter())
         for p in range(w * h):
             o = p * 4
             if data[o + 3] >= ALPHA_THRESHOLD:
                 counter[(data[o], data[o + 1], data[o + 2])] += 1
 
-    material_pixels = {m: list(c.elements()) for m, c in material_colors.items()
-                       if c}
+    key_pixels = {k: list(c.elements()) for k, c in key_colors.items() if c}
     palette, table, assignments = plan_quantization(
-        material_pixels, counts, base_palette,
-        material_table=material_table, protected=protected)
+        key_pixels, counts, base_palette,
+        material_table=material_table, protected=protected,
+        selectors=selectors)
     if uniquify:
         from .colorops import uniquify_palette
         palette = uniquify_palette(palette)
@@ -84,11 +88,11 @@ def compute_quantization(image, layer_materials, counts, base_palette,
     # remap bottom-up so upper layers overwrite, like on canvas
     indices = bytearray(width * height)
     luts = {}
-    for material, off_x, off_y, w, h, data in reversed(sources):
-        allowed = assignments.get(material)
+    for key, off_x, off_y, w, h, data in reversed(sources):
+        allowed = assignments.get(key)
         if not allowed:
             continue
-        lut = luts.setdefault(material, {})
+        lut = luts.setdefault(key, {})
         for p in range(w * h):
             o = p * 4
             if data[o + 3] < ALPHA_THRESHOLD:
@@ -105,11 +109,11 @@ def compute_quantization(image, layer_materials, counts, base_palette,
             indices[y * width + x] = idx
 
     stats = []
-    for material, allowed in assignments.items():
+    for key, allowed in assignments.items():
+        label = resolve_selection_key(key)[0]
         pool = [i for i in allowed if i >= 188]
         stats.append(
-            f"{MATERIAL_NAMES.get(material, material)}: "
-            f"{len(material_colors[material])} unique colors -> "
+            f"{label}: {len(key_colors[key])} unique colors -> "
             f"{len(allowed)} slots ({len(allowed) - len(pool)} reused, "
             f"{len(pool)} from 188-235)")
     return {
@@ -194,12 +198,24 @@ def palette_hex_string(colors):
     return ';'.join('#%02x%02x%02x' % tuple(c) for c in colors)
 
 
-def apply_palette_to_drawable(drawable, allowed_colors):
-    """Quantize one drawable in place to the given colors.
+def resolve_selection_key(key):
+    """A dialog selection key -> (label, target_material, members tuple).
+
+    Keys are either a material value (int / str int) or ``group:GID``.
+    """
+    if isinstance(key, str) and key.startswith('group:'):
+        label, members = MATERIAL_GROUPS[key[6:]]
+        return label, members[0], tuple(members)
+    material = int(key)
+    return MATERIAL_NAMES.get(material, str(material)), material, (material,)
+
+
+def apply_palette_to_drawable(drawable, allowed_colors, destructive=False):
+    """Quantize one drawable to the given colors.
 
     Uses the sibling C plug-in's GEGL op (custom:palette-quantize) when
-    available — proper metrics, honors alpha; falls back to a pure-python
-    nearest-color remap otherwise.
+    available — non-destructively as a layer effect by default, or baked in
+    with ``destructive=True``. The pure-python fallback is always destructive.
     """
     try:
         flt = Gimp.DrawableFilter.new(drawable, 'custom:palette-quantize',
@@ -207,10 +223,15 @@ def apply_palette_to_drawable(drawable, allowed_colors):
         cfg = flt.get_config()
         cfg.set_property('palette', palette_hex_string(allowed_colors))
         flt.update()
-        drawable.merge_filter(flt)
+        if destructive:
+            drawable.merge_filter(flt)
+        else:
+            drawable.append_filter(flt)
         return 'gegl'
     except Exception:
         pass
+    if not destructive:
+        return 'unavailable'  # can't do non-destructive without the GEGL op
     # fallback: nearest-color remap, alpha preserved
     w, h = drawable.get_width(), drawable.get_height()
     rect = Gegl.Rectangle.new(0, 0, w, h)
@@ -270,16 +291,21 @@ class QuantizeDialog:
             combo.append(SKIP, '— skip —')
             for mat_name, mat_value in MATERIAL.items():
                 combo.append(str(mat_value), mat_name)
+            for gid, (label_text, _members) in MATERIAL_GROUPS.items():
+                combo.append(f"group:{gid}", label_text)
             combo.set_active_id(str(guess) if guess is not None else SKIP)
             combo.connect('changed', lambda _c: self._rebuild_counts())
             row.pack_start(combo, False, False, 0)
             self.layer_rows.append((layer, combo))
             layer_list.pack_start(row, False, False, 0)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_size_request(-1, min(220, 30 * max(1, len(self.layer_rows))))
-        scroll.add(layer_list)
-        left.pack_start(scroll, False, False, 0)
+        if len(self.layer_rows) <= 7:
+            left.pack_start(layer_list, False, False, 0)
+        else:
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_size_request(-1, 320)
+            scroll.add(layer_list)
+            left.pack_start(scroll, False, False, 0)
 
         left.pack_start(Gtk.Label(label='Colors per material:', xalign=0),
                         False, False, 0)
@@ -302,6 +328,13 @@ class QuantizeDialog:
         self.unique_check = Gtk.CheckButton(label='Unique colors')
         self.unique_check.set_active(True)
         left.pack_start(self.unique_check, False, False, 0)
+        self.nde_check = Gtk.CheckButton(label='Apply as non-destructive layer effects')
+        self.nde_check.set_active(True)
+        self.nde_check.set_tooltip_text(
+            'Attach the palette-quantize op as an editable layer effect '
+            '(needs the GEGL op installed); uncheck to bake the colors into '
+            'the layers (python fallback available)')
+        left.pack_start(self.nde_check, False, False, 0)
 
         name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         name_row.pack_start(Gtk.Label(label='Output name:', xalign=0), False, False, 0)
@@ -336,6 +369,20 @@ class QuantizeDialog:
         frame = Gtk.Frame()
         frame.add(self.grid.widget)
         right.pack_start(frame, False, False, 0)
+
+        # manual material edits on the palette: feed both the plan (export,
+        # mask view, bad pixels) and the next Quantize run (reuse targets)
+        self._table_override = {}
+        assign_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.assign_combo = Gtk.ComboBoxText()
+        for mat_name, mat_value in MATERIAL.items():
+            self.assign_combo.append(str(mat_value), mat_name)
+        self.assign_combo.set_active(0)
+        assign_row.pack_start(self.assign_combo, True, True, 0)
+        assign_btn = Gtk.Button(label='Assign material to selection')
+        assign_btn.connect('clicked', self._on_assign_material)
+        assign_row.pack_start(assign_btn, False, False, 0)
+        right.pack_start(assign_row, False, False, 0)
 
         from .studio import PreviewCanvas
         self.canvas = PreviewCanvas()
@@ -374,41 +421,80 @@ class QuantizeDialog:
         for layer, combo in self.layer_rows:
             active = combo.get_active_id()
             if active and active != SKIP:
-                out.append((layer, int(active)))
+                out.append((layer, active))
         return out
 
+    def _default_count(self, key):
+        """Default color count = slots that key's materials own in the base palette."""
+        if not hasattr(self, 'palette_combo'):  # combos fire during construction
+            return DEFAULT_COUNT
+        _colors, table, _anim = self._base_palette()
+        _label, _target, members = resolve_selection_key(key)
+        n = sum(1 for m in table if m in members)
+        return max(1, min(64, n or DEFAULT_COUNT))
+
     def _rebuild_counts(self):
-        used = sorted({m for _l, m in self._assignments()})
+        used = sorted({key for _l, key in self._assignments()})
         for child in self.counts_box.get_children():
             child.destroy()
         old = dict(self.count_spins)
         self.count_spins = {}
-        for material in used:
+        for key in used:
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            row.pack_start(Gtk.Label(label=MATERIAL_NAMES.get(material, str(material)),
+            row.pack_start(Gtk.Label(label=resolve_selection_key(key)[0],
                                      xalign=0), True, True, 0)
-            spin = Gtk.SpinButton.new_with_range(1, 48, 1)
-            spin.set_value(old[material].get_value() if material in old else DEFAULT_COUNT)
-            self.count_spins[material] = spin
+            spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+            spin.set_value(old[key].get_value() if key in old
+                           else self._default_count(key))
+            self.count_spins[key] = spin
             row.pack_start(spin, False, False, 0)
             self.counts_box.pack_start(row, False, False, 0)
         self.counts_box.show_all()
 
     def _base_palette(self):
         source = self.palette_combo.get_active_id()
-        if source == '__default__':
-            return default_palette().colors, list(DEFAULT_MATERIALS), set(ANIMATED_INDICES)
-        pal = next((p for p in Gimp.palettes_get_list(source)
-                    if p.get_name() == source), None)
-        if pal is None:
-            return default_palette().colors, list(DEFAULT_MATERIALS), set(ANIMATED_INDICES)
-        colors = [rgb8_from_color(c) for c in pal.get_colors()]
-        while len(colors) < 256:
-            colors.append((0, 0, 0))
-        names = [pal.get_entry_name(i)[1] for i in range(pal.get_color_count())]
-        table = materials_from_entry_names(names) or list(DEFAULT_MATERIALS)
-        animated = animated_from_entry_names(names) or set(ANIMATED_INDICES)
-        return colors[:256], table, animated
+        colors, table, animated = (default_palette().colors,
+                                   list(DEFAULT_MATERIALS), set(ANIMATED_INDICES))
+        if source != '__default__':
+            pal = next((p for p in Gimp.palettes_get_list(source)
+                        if p.get_name() == source), None)
+            if pal is not None:
+                colors = [rgb8_from_color(c) for c in pal.get_colors()]
+                while len(colors) < 256:
+                    colors.append((0, 0, 0))
+                colors = colors[:256]
+                names = [pal.get_entry_name(i)[1]
+                         for i in range(pal.get_color_count())]
+                table = materials_from_entry_names(names) or list(DEFAULT_MATERIALS)
+                animated = animated_from_entry_names(names) or set(ANIMATED_INDICES)
+        table = list(table)
+        for idx, material in self._table_override.items():
+            table[idx] = material
+        return colors, table, animated
+
+    def _on_assign_material(self, _btn):
+        if not self.grid.selected:
+            self.stats.set_text('Select swatches on the grid first.')
+            return
+        material = int(self.assign_combo.get_active_id())
+        for i in self.grid.selected:
+            self._table_override[i] = material
+        if self.plan is not None:
+            for i in self.grid.selected:
+                self.plan['table'][i] = material
+            self.grid.table = list(self.plan['table'])
+            self._bad = find_isolated_pixels(self.plan['indices'], self.plan['width'],
+                                             self.plan['height'], self.plan['table'])
+            self._render_plan_preview()
+        else:
+            table = list(self.grid.table)
+            for i in self.grid.selected:
+                table[i] = material
+            self.grid.table = table
+        self.grid.queue_draw()
+        self.stats.set_text(f"Assigned {MATERIAL_NAMES.get(material, material)} to "
+                            f"{len(self.grid.selected)} indices (applies to the "
+                            "plan and to the next Quantize run).")
 
     # ---- actions --------------------------------------------------------------
 
@@ -441,15 +527,17 @@ class QuantizeDialog:
                                self.plan['indices'])
         self._bad = find_isolated_pixels(self.plan['indices'], self.plan['width'],
                                          self.plan['height'], self.plan['table'])
-        # material filter options follow the plan
+        # material filter options follow the plan (union of selected members)
         current = self.filter_combo.get_active_id()
+        materials = sorted({m for key in self.plan['assignments']
+                            for m in resolve_selection_key(key)[2]})
         self.filter_combo.remove_all()
         self.filter_combo.append('all', 'All materials')
-        for material in sorted(self.plan['assignments']):
+        for material in materials:
             self.filter_combo.append(str(material),
                                      MATERIAL_NAMES.get(material, str(material)))
         self.filter_combo.set_active_id(
-            current if current in {str(m) for m in self.plan['assignments']} else 'all')
+            current if current in {str(m) for m in materials} else 'all')
         self._render_plan_preview()
         self.stats.set_text("\n".join(self.plan['stats'])
                             + f"\nBad pixels (isolated material): {len(self._bad)}"
@@ -499,20 +587,24 @@ class QuantizeDialog:
         if self.plan is None:
             return
         palette = self.plan['palette']
+        destructive = not self.nde_check.get_active()
         self.image.undo_group_start()
-        used_gegl = used_python = 0
+        used_gegl = used_python = unavailable = 0
         try:
-            for layer, material in self._assignments():
-                allowed = self.plan['assignments'].get(material)
+            for layer, key in self._assignments():
+                allowed = self.plan['assignments'].get(key)
                 if not allowed:
                     continue
                 colors = [palette[i] for i in allowed]
                 for leaf in leaf_drawables(layer):
-                    how = apply_palette_to_drawable(leaf, colors)
+                    how = apply_palette_to_drawable(leaf, colors,
+                                                    destructive=destructive)
                     if how == 'gegl':
                         used_gegl += 1
-                    else:
+                    elif how == 'python':
                         used_python += 1
+                    else:
+                        unavailable += 1
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -521,14 +613,22 @@ class QuantizeDialog:
         finally:
             self.image.undo_group_end()
             Gimp.displays_flush()
+        if unavailable:
+            self.stats.set_text(
+                'Non-destructive apply needs the palette-quantize GEGL op '
+                '(sibling plug-in) installed. Uncheck "non-destructive" to '
+                'bake colors with the python fallback instead.')
+            return
         via = []
         if used_gegl:
-            via.append(f"{used_gegl} via palette-quantize op")
+            mode = 'layer effects' if not destructive else 'baked'
+            via.append(f"{used_gegl} via palette-quantize op ({mode})")
         if used_python:
-            via.append(f"{used_python} via python remap")
+            via.append(f"{used_python} baked via python remap")
         self.stats.set_text(
             f"Applied material palettes to layers ({', '.join(via)}).\n"
-            "The image stays RGB and editable - one undo step reverts all.")
+            + ("Layer effects are editable/removable per layer.\n" if not destructive else "")
+            + "One undo step reverts all.")
 
     # ---- settings persistence (parasite, survives in the XCF) -----------------
 
@@ -536,11 +636,13 @@ class QuantizeDialog:
         data = {
             'layers': {layer.get_name() or '': combo.get_active_id()
                        for layer, combo in self.layer_rows},
-            'counts': {str(m): int(s.get_value())
-                       for m, s in self.count_spins.items()},
+            'counts': {str(k): int(s.get_value())
+                       for k, s in self.count_spins.items()},
             'palette': self.palette_combo.get_active_id(),
             'protect_worm': self.protect_worm.get_active(),
             'unique': self.unique_check.get_active(),
+            'nde': self.nde_check.get_active(),
+            'overrides': {str(i): m for i, m in self._table_override.items()},
             'name': self.name_entry.get_text(),
         }
         try:
@@ -571,6 +673,9 @@ class QuantizeDialog:
             self.palette_combo.set_active_id('__default__')
         self.protect_worm.set_active(data.get('protect_worm', True))
         self.unique_check.set_active(data.get('unique', True))
+        self.nde_check.set_active(data.get('nde', True))
+        self._table_override = {int(i): m
+                                for i, m in data.get('overrides', {}).items()}
         if data.get('name'):
             self.name_entry.set_text(data['name'])
 
