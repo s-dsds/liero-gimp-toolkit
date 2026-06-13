@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # the Python versions GIMP 3.x bundles across platforms
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Byte-compile (the "compile" step for pure-Python plug-ins)
+        run: python -m compileall -q liero_core plugins liero_palette_cli.py tools
+      - name: Test
+        run: |
+          python -m pip install --quiet pytest pillow
+          python -m pytest tests -q
+
+  package:
+    name: package zips
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build per-platform zips
+        run: python tools/package.py "${GITHUB_SHA::8}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: liero-gimp-toolkit-zips
+          path: dist/*.zip
+          if-no-files-found: error
