@@ -167,6 +167,48 @@ def test_material_mask_colors():
     assert mask[9:12] == bytes((60, 60, 60))   # 0 solid
 
 
+def test_canonical_index_for_material():
+    from liero_core.defaults import MATERIAL
+    assert ol.canonical_index_for_material(MATERIAL["DIRT"]) == 12
+    assert ol.canonical_index_for_material(MATERIAL["ROCK"]) == 19
+    assert ol.canonical_index_for_material(MATERIAL["WORM"]) == 30
+    assert ol.canonical_index_for_material(MATERIAL["BG_SEESHADOW"]) == 160  # open space
+
+
+def test_compose_material_mask_topmost_wins():
+    # 2x1, layers TOP-to-BOTTOM: A covers px0 (rock 19), B covers both (dirt 12).
+    cov_a = bytes([1, 0])
+    cov_b = bytes([1, 1])
+    mask = ol.compose_material_mask(2, 1, [(cov_a, 19), (cov_b, 12)], default_index=160)
+    assert mask == bytes([19, 12])         # topmost A wins px0; B fills px1
+    # uncovered -> default
+    mask2 = ol.compose_material_mask(2, 1, [(bytes([1, 0]), 4)], default_index=160)
+    assert mask2 == bytes([4, 160])
+
+
+def test_build_anim_rgba_from_layers():
+    # 3x1: top layer covers px0 not animated (blocks); bottom covers px0,1 ramp 2.
+    top = bytes([1, 0, 0])
+    bottom = bytes([1, 1, 0])
+    anim = ol.build_anim_rgba(3, 1, [(top, 0), (bottom, 2)], default_phase=5)
+    # px0 claimed by non-animated top -> stays 0
+    assert anim[0:4] == bytes([0, 0, 0, 0])
+    # px1 animated by bottom -> R=ramp2, G=phase5, A=255
+    assert anim[4:8] == bytes([2, 5, 0, 255])
+    # px2 uncovered
+    assert anim[8:12] == bytes([0, 0, 0, 0])
+
+
+def test_ramps_json_roundtrip(tmp_path):
+    ramps = [{"shift": 3, "colors": ["#1A3A6A", "#2A4A7A"]}]
+    p = tmp_path / "ramps.json"
+    ol.save_ramps_json(p, ramps)
+    assert ol.load_ramps_json(p) == ramps
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        ol.save_ramps_json(p, [{"shift": 0, "colors": []}])  # empty colors invalid
+
+
 def test_size_bounds_enforced():
     with pytest.raises(ValueError, match="outside"):
         ol.build_level(0, 10, b"", b"")
