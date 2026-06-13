@@ -35,11 +35,13 @@ Subtleties the tools enforce that the markdown omits:
   (red = ramp index 1-based, green = phase). Ramp index must be <= ramp_count.
 """
 from __future__ import annotations
+import json
 import struct
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
 from .defaults import DEFAULT_MATERIALS, MATERIAL
+from .material import indices_for_material
 
 LEGACY_W, LEGACY_H = 504, 350
 MAX_DIM = 4096
@@ -302,3 +304,76 @@ def render_frame_rgb(level: Dict, palette_rgb: bytes, cycles: int = 0) -> bytes:
             r, g, b = palette_rgb[pi * 3], palette_rgb[pi * 3 + 1], palette_rgb[pi * 3 + 2]
         out[i * 3], out[i * 3 + 1], out[i * 3 + 2] = r, g, b
     return bytes(out)
+
+
+# --- build material/anim maps from layer coverage ---------------------------
+# Lets the GIMP plug-in derive a material mask (and animation map) on the fly
+# from the named top-level layers/groups of an RGB image, instead of needing a
+# separate indexed image.
+
+def canonical_index_for_material(material: int, materials_table=None) -> int:
+    """A representative palette index whose material == `material`.
+
+    Physics-equivalent to any other index of that material; for the common
+    materials these are the OpenLiero/lev_gen canonical indices (dirt=12,
+    rock=19, worm=30, open space=160).
+    """
+    idxs = indices_for_material(material, materials_table)
+    return idxs[0] if idxs else 0
+
+
+def compose_material_mask(width: int, height: int, layers, default_index: int = 160) -> bytes:
+    """Material index map from layer coverage.
+
+    `layers` is an iterable of (coverage, index) in TOP-to-BOTTOM order;
+    `coverage` is width*height bytes (nonzero = covered). The topmost covered
+    layer wins; uncovered pixels get `default_index` (160 = open space).
+    """
+    n = width * height
+    out = bytearray([default_index & 0xFF]) * n
+    claimed = bytearray(n)
+    for cov, idx in layers:
+        if len(cov) != n:
+            raise ValueError("coverage size mismatch")
+        idx &= 0xFF
+        for i in range(n):
+            if cov[i] and not claimed[i]:
+                out[i] = idx
+                claimed[i] = 1
+    return bytes(out)
+
+
+def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0) -> bytes:
+    """Animation RGBA (R=ramp 1-based, G=phase, A=255 where animated) from layer
+    coverage. `layers` is (coverage, ramp_index) TOP-to-BOTTOM; topmost covered
+    layer wins (a non-animated higher layer still blocks a lower animated one).
+    ramp_index <= 0 means "covered but not animated".
+    """
+    n = width * height
+    out = bytearray(n * 4)
+    claimed = bytearray(n)
+    ph = default_phase & 0xFF
+    for cov, ramp in layers:
+        if len(cov) != n:
+            raise ValueError("coverage size mismatch")
+        for i in range(n):
+            if cov[i] and not claimed[i]:
+                claimed[i] = 1
+                if ramp > 0:
+                    out[i * 4] = ramp & 0xFF
+                    out[i * 4 + 1] = ph
+                    out[i * 4 + 3] = 255
+    return bytes(out)
+
+
+def save_ramps_json(path, ramps: List[Dict]) -> None:
+    """Write ramps to a lev_gen-compatible ramps.json (validated first)."""
+    validate_ramps(ramps)
+    Path(path).write_text(json.dumps(ramps, indent=2))
+
+
+def load_ramps_json(path) -> List[Dict]:
+    """Read and validate a ramps.json."""
+    ramps = json.loads(Path(path).read_text())
+    validate_ramps(ramps)
+    return ramps
