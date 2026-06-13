@@ -115,7 +115,11 @@ class LevelExportDialog:
         self._cycles = 0
         self._timer = None
         self._mode = _MODE_DISPLAY
-        self._ready = False  # guards _rebuild_level during widget construction
+        self._ready = False        # guards rebuilds during widget construction
+        self._suspend = False      # set while programmatically refilling combos
+        self._pending = None       # idle id for a coalesced rebuild
+        self._display_rgba = None  # cached image composite (read once)
+        self._mask_cache = {}      # cached indexed-mask indices by image id
         self._build()
 
     # ---- UI -----------------------------------------------------------------
@@ -307,10 +311,15 @@ class LevelExportDialog:
         for ri, ramp in enumerate(self.ramps):
             self.ramps_box.pack_start(self._ramp_row(ri, ramp), False, False, 0)
         self.ramps_box.show_all()
-        # keep each layer's ramp combo in sync with the ramp count
-        for _layer, _mat, ramp_combo in self.layer_rows:
-            cur = ramp_combo.get_active()
-            self._fill_ramp_combo(ramp_combo, cur)
+        # keep each layer's ramp combo in sync with the ramp count, WITHOUT
+        # letting set_active fire 'changed' (which would storm rebuilds).
+        self._suspend = True
+        try:
+            for _layer, _mat, ramp_combo in self.layer_rows:
+                cur = ramp_combo.get_active()
+                self._fill_ramp_combo(ramp_combo, cur)
+        finally:
+            self._suspend = False
 
     def _ramp_row(self, ri, ramp):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -465,24 +474,48 @@ class LevelExportDialog:
             return material, self.ramps, anim
         return material, None, None
 
+    def _display(self):
+        """The image composite as RGBA bytes, read once and cached."""
+        if self._display_rgba is None:
+            self._display_rgba = _flatten_read(self.image, "R'G'B'A u8", self.w, self.h)
+        return self._display_rgba
+
+    def _indexed_mask(self, image):
+        key = image.get_id()
+        if key not in self._mask_cache:
+            self._mask_cache[key] = _flatten_read(image, None, self.w, self.h)
+        return self._mask_cache[key]
+
     def _gather(self):
         """Return (material, display_rgba, ramps, anim_rgba) or None if not ready."""
-        display = _flatten_read(self.image, "R'G'B'A u8", self.w, self.h)
+        display = self._display()
         if self.mask_source == 'indexed':
             if self.mask_image is None or \
                     (self.mask_image.get_width(), self.mask_image.get_height()) != (self.w, self.h):
                 return None
-            material = _flatten_read(self.mask_image, None, self.w, self.h)
+            material = self._indexed_mask(self.mask_image)
             ramps = self.ramps if self.ramps else None
-            anim = None
-            return material, display, ramps, anim
+            return material, display, ramps, None
         # layers source
         material, ramps, anim = self._material_from_layers()
         return material, display, ramps, anim
 
     def _rebuild_level(self):
-        if not self._ready:
+        """Coalesce many rapid changes into one rebuild on the idle loop.
+
+        Crucially this runs the heavy work OFF the GTK signal stack, so a combo
+        'changed' can't re-enter image duplication mid-signal.
+        """
+        if not self._ready or self._suspend or self._pending is not None:
             return
+        self._pending = GLib.idle_add(self._rebuild_idle)
+
+    def _rebuild_idle(self):
+        self._pending = None
+        self._do_rebuild_level()
+        return False
+
+    def _do_rebuild_level(self):
         self._stop_timer()
         got = self._gather()
         if got is None:
@@ -587,6 +620,9 @@ class LevelExportDialog:
                 break
         finally:
             self._stop_timer()
+            if self._pending is not None:
+                GLib.source_remove(self._pending)
+                self._pending = None
             self.dialog.destroy()
 
 
