@@ -1,0 +1,31 @@
+name: Release
+
+# Push a tag like v0.1.0 to cut a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Sanity check (byte-compile + tests)
+        run: |
+          python -m compileall -q liero_core plugins liero_palette_cli.py tools
+          python -m pip install --quiet pytest pillow
+          python -m pytest tests -q
+      - name: Build per-platform zips
+        run: python tools/package.py "${GITHUB_REF_NAME}"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
