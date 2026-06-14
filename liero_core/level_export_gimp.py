@@ -20,13 +20,13 @@ gi.require_version('Gimp', '3.0')
 gi.require_version('GimpUi', '3.0')
 gi.require_version('Gegl', '0.4')
 gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-from gi.repository import Gimp, GimpUi, Gegl, GLib, Gtk, Gdk  # noqa: E402
+from gi.repository import Gimp, GimpUi, Gegl, GLib, Gtk  # noqa: E402
 
 from . import openliero  # noqa: E402
 from .studio import PreviewCanvas, colors_from_gimp_palette  # noqa: E402
 from .material import classify_name  # noqa: E402
 from .defaults import MATERIAL, MATERIAL_NAMES, MATERIAL_GROUPS  # noqa: E402
+from .gimp_colors import color_from_rgb8, rgb8_from_color  # noqa: E402
 
 RESP_EXPORT = 100
 _MODE_DISPLAY, _MODE_MASK, _MODE_ANIM = 'display', 'mask', 'anim'
@@ -63,19 +63,9 @@ def _default_key_for(name):
     return mat if mat is not None else None
 
 
-def _hex_to_rgba(hx):
+def _hex_to_gegl(hx):
     hx = hx.lstrip('#')
-    c = Gdk.RGBA()
-    c.red = int(hx[0:2], 16) / 255.0
-    c.green = int(hx[2:4], 16) / 255.0
-    c.blue = int(hx[4:6], 16) / 255.0
-    c.alpha = 1.0
-    return c
-
-
-def _rgba_to_hex(rgba):
-    return '#%02X%02X%02X' % (round(rgba.red * 255), round(rgba.green * 255),
-                              round(rgba.blue * 255))
+    return color_from_rgb8((int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)))
 
 
 def _flatten_read(image, fmt, w, h):
@@ -120,6 +110,8 @@ class LevelExportDialog:
         self._pending = None       # idle id for a coalesced rebuild
         self._display_rgba = None  # cached image composite (read once)
         self._mask_cache = {}      # cached indexed-mask indices by image id
+        self._anim_base = None     # static preview frame (cycles=0), recomputed per rebuild
+        self._anim_cells = []      # animated pixels for fast per-tick update
         self._build()
 
     # ---- UI -----------------------------------------------------------------
@@ -357,13 +349,17 @@ class LevelExportDialog:
         rm = Gtk.Button(label="✕ ramp")
         rm.connect('clicked', self._on_remove_ramp, ri)
         top.pack_end(rm, False, False, 0)
+        from_layer = Gtk.Button(label="From layer…")
+        from_layer.set_tooltip_text("Set this ramp's colours from a layer's colours")
+        from_layer.connect('clicked', self._on_ramp_from_layer, ri)
+        top.pack_end(from_layer, False, False, 0)
         box.pack_start(top, False, False, 0)
 
         colors = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         for ci, hx in enumerate(ramp['colors']):
-            btn = Gtk.ColorButton.new_with_rgba(_hex_to_rgba(hx))
-            btn.set_title(f"Ramp {ri + 1} colour {ci + 1}")
-            btn.connect('color-set', self._on_color_set, ri, ci)
+            btn = GimpUi.ColorButton.new(f"Ramp {ri + 1} colour {ci + 1}", 22, 16,
+                                         _hex_to_gegl(hx), GimpUi.ColorAreaType.FLAT)
+            btn.connect('color-changed', self._on_color_set, ri, ci)
             colors.pack_start(btn, False, False, 0)
         add_c = Gtk.Button(label="+")
         add_c.connect('clicked', self._on_add_color, ri)
@@ -391,7 +387,45 @@ class LevelExportDialog:
         self._rebuild_level()
 
     def _on_color_set(self, btn, ri, ci):
-        self.ramps[ri]['colors'][ci] = _rgba_to_hex(btn.get_rgba())
+        rgb = rgb8_from_color(btn.get_color())
+        self.ramps[ri]['colors'][ci] = '#%02X%02X%02X' % (rgb[0], rgb[1], rgb[2])
+        self._rebuild_level()
+
+    def _on_ramp_from_layer(self, _b, ri):
+        layers = self.image.get_layers()
+        if not layers:
+            return
+        dlg = Gtk.Dialog(title='Ramp colours from layer')
+        dlg.add_button('_Cancel', Gtk.ResponseType.CANCEL)
+        dlg.add_button('_Use colours', Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_border_width(8)
+        box.add(Gtk.Label(label="Take this ramp's colours from layer:", xalign=0))
+        combo = Gtk.ComboBoxText()
+        for layer in layers:
+            combo.append_text(layer.get_name() or 'layer')
+        combo.set_active(0)
+        box.add(combo)
+        box.show_all()
+        resp = dlg.run()
+        idx = combo.get_active()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or idx < 0:
+            return
+        layer = layers[idx]
+        try:
+            lw, lh = layer.get_width(), layer.get_height()
+            rect = Gegl.Rectangle.new(0, 0, lw, lh)
+            rgba = bytes(layer.get_buffer().get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP))
+            cols = openliero.ordered_unique_colors(rgba, max_colors=64)
+        except Exception as exc:
+            Gimp.message(f"Could not sample layer: {exc}")
+            return
+        if not cols:
+            Gimp.message("That layer has no opaque pixels.")
+            return
+        self.ramps[ri]['colors'] = cols
+        self._rebuild_ramps_ui()
         self._rebuild_level()
 
     def _on_add_color(self, _b, ri):
@@ -560,9 +594,14 @@ class LevelExportDialog:
             return
         if self.mask_source == 'indexed' and self.mask_image is not None:
             self._pal = _palette_rgb_indexed(self.mask_image)
-        n_anim = sum(1 for b in (self._level.get('display_anim') or b'') if b)
+        # precompute the static frame + animated cells once, so preview ticks
+        # only rewrite animated pixels (a full-frame render each tick freezes).
+        self._anim_base = openliero.render_frame_rgb(self._level, self._pal, 0)
+        self._anim_cells = openliero.animation_cells(self._level)
+        self._cycles = 0
+        n_anim = len(self._anim_cells)
         self.export_btn.set_sensitive(True)
-        self.play_btn.set_sensitive(bool(anim))
+        self.play_btn.set_sensitive(n_anim > 0)
         self.status.set_text(f"Ready: {self.w}×{self.h}, "
                              f"{len(ramps) if ramps else 0} ramp(s), {n_anim} animated px.")
         self._render()
@@ -580,19 +619,18 @@ class LevelExportDialog:
             self._render()
 
     def _render(self):
-        if self._level is None:
+        if self._level is None or self._anim_base is None:
             return
         if self._mode == _MODE_MASK:
             rgb = openliero.material_mask_rgb(self._level['material'])
-        elif self._mode == _MODE_ANIM:
-            rgb = openliero.render_frame_rgb(self._level, self._pal, self._cycles)
-        else:
-            rgb = openliero.render_frame_rgb(self._level, self._pal, 0)
+        elif self._mode == _MODE_ANIM and self._anim_cells:
+            rgb = openliero.render_anim_frame(self._anim_base, self._anim_cells, self._cycles)
+        else:  # display, or animation with nothing animated -> the static frame
+            rgb = self._anim_base
         self.canvas.render_rgb(rgb)
 
     def _on_play(self, btn):
-        if btn.get_active() and self._mode == _MODE_ANIM and self._level is not None \
-                and self._level.get('display_anim'):
+        if btn.get_active() and self._mode == _MODE_ANIM and self._anim_cells:
             btn.set_label("⏸ Pause")
             if self._timer is None:
                 self._timer = GLib.timeout_add(120, self._tick)

@@ -377,3 +377,56 @@ def load_ramps_json(path) -> List[Dict]:
     ramps = json.loads(Path(path).read_text())
     validate_ramps(ramps)
     return ramps
+
+
+# --- fast incremental animation preview -------------------------------------
+# Re-rendering the whole frame every tick is O(w*h) in pure Python and freezes
+# the UI on a real level. Instead: render one static base, then each tick only
+# rewrite the (usually few) animated pixels.
+
+def animation_cells(level: Dict):
+    """List of (pixel_index, ramp_colors, shift, phase_offset) for animated px."""
+    da = level.get('display_anim')
+    if not da:
+        return []
+    dd = level['display_data']
+    ramps = _ramps_to_rgb(level.get('ramps') or [])
+    cells = []
+    for i, a in enumerate(da):
+        if a and a <= len(ramps):
+            shift, cols = ramps[a - 1]
+            if cols:
+                phase = int.from_bytes(dd[i * 4:i * 4 + 4], 'little')
+                cells.append((i, cols, shift, phase))
+    return cells
+
+
+def render_anim_frame(base_rgb: bytes, cells, cycles: int) -> bytes:
+    """Static `base_rgb` with only the animated `cells` updated for `cycles`.
+
+    Equivalent to render_frame_rgb(level, pal, cycles) but O(animated) per call.
+    """
+    out = bytearray(base_rgb)
+    for i, cols, shift, phase in cells:
+        inc = (cycles >> shift) if shift < 32 else 0
+        r, g, b = cols[(phase + inc) % len(cols)]
+        out[i * 3], out[i * 3 + 1], out[i * 3 + 2] = r, g, b
+    return bytes(out)
+
+
+def ordered_unique_colors(rgba: bytes, max_colors: int = 64) -> List[str]:
+    """Distinct opaque colours in an RGBA buffer, ordered by luminance (so a
+    ramp built from them cycles smoothly), capped to `max_colors` by even
+    sampling. Returns '#RRGGBB' strings — ideal ramp colours from a layer.
+    """
+    seen = set()
+    for i in range(0, len(rgba), 4):
+        if rgba[i + 3] > 0:
+            seen.add((rgba[i], rgba[i + 1], rgba[i + 2]))
+    colors = sorted(seen, key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+    if not colors:
+        return []
+    if len(colors) > max_colors:
+        step = len(colors) / max_colors
+        colors = [colors[int(k * step)] for k in range(max_colors)]
+    return ['#%02X%02X%02X' % c for c in colors]
