@@ -534,60 +534,104 @@ class LevelExportDialog:
         self._cov_cache[key] = cov
         return cov
 
+    def _layer_rgba(self, layer):
+        """The layer's OWN pixels placed on the canvas (transparent elsewhere)."""
+        key = ('rgba', layer.get_id())
+        if key in self._cov_cache:
+            return self._cov_cache[key]
+        lw, lh = layer.get_width(), layer.get_height()
+        off = layer.get_offsets()
+        ox, oy = (off[1], off[2]) if len(off) == 3 else (off[0], off[1])
+        rect = Gegl.Rectangle.new(0, 0, lw, lh)
+        src = layer.get_buffer().get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP)
+        W, H = self.w, self.h
+        out = bytearray(W * H * 4)
+        for ly in range(lh):
+            iy = oy + ly
+            if iy < 0 or iy >= H:
+                continue
+            for lx in range(lw):
+                ix = ox + lx
+                if 0 <= ix < W:
+                    si = (ly * lw + lx) * 4
+                    di = (iy * W + ix) * 4
+                    out[di:di + 4] = src[si:si + 4]
+        out = bytes(out)
+        self._cov_cache[key] = out
+        return out
+
     def _material_from_layers(self):
         n = self.w * self.h
+        rows = self.layer_rows  # top-to-bottom (get_layers()[0] is topmost)
         display0 = self._display()
-        # pre-scan palette-colorAnim layers -> union coverage, quantize the
-        # water band (168-171) from their painted colours.
-        union = bytearray(n)
-        any_pal = False
-        for layer, _mc, anim_combo in self.layer_rows:
-            if anim_combo.get_active_id() == 'palette':
-                any_pal = True
-                cov = self._coverage(layer)
-                for i in range(n):
-                    if cov[i]:
-                        union[i] = 1
-        reps, band_idx = ([], bytes(n))
-        if any_pal:
-            reps, band_idx = openliero.fit_palette_anim_band(
-                bytes(union), display0, openliero.WATER_LO, openliero.WATER_HI)
+        band = openliero.WATER_HI - openliero.WATER_LO + 1
 
-        display = bytearray(display0)
-        mat_layers, anim_layers = [], []
-        for layer, mat_combo, anim_combo in self.layer_rows:
-            choice = anim_combo.get_active_id()
+        # ownership: the topmost CONTRIBUTING layer at each pixel (a 'skip'
+        # material with no animation doesn't contribute / doesn't own).
+        owner = [-1] * n
+        for li, (layer, mc, ac) in enumerate(rows):
+            if ac.get_active_id() != 'palette' and self._combo_key(mc) is None:
+                continue
             cov = self._coverage(layer)
-            if choice == 'palette':
-                mat_layers.append((cov, band_idx))   # per-pixel water indices
-                anim_layers.append((cov, 0))         # blocks lower layers; no ramp
-                for i in range(n):
-                    if cov[i]:
-                        display[i * 4 + 3] = 0        # transparent -> palette colorAnim path
-                continue
-            key = self._combo_key(mat_combo)
-            if key is None:
-                continue
-            mat_layers.append((cov, _key_to_index(key)))
-            ramp = int(choice[5:]) if choice and choice.startswith('ramp:') else 0
-            anim_layers.append((cov, ramp))
+            for i in range(n):
+                if cov[i] and owner[i] == -1:
+                    owner[i] = li
+
+        is_palette = [ac.get_active_id() == 'palette' for (_l, _m, ac) in rows]
+
+        # water band reps from each water layer's OWN owned pixels (not the
+        # composite — the composite shows whatever sits on top).
+        water_rgba = {}
+        cols = []
+        for i in range(n):
+            li = owner[i]
+            if li != -1 and is_palette[li]:
+                if li not in water_rgba:
+                    water_rgba[li] = self._layer_rgba(rows[li][0])
+                rgba = water_rgba[li]
+                cols.append((rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]))
+        reps = openliero.quantize_band_colors(cols, band) if cols else []
+        while reps and len(reps) < band:
+            reps.append(reps[-1])
 
         default_idx = _key_to_index(self._combo_key(self.uncovered_combo)) or 160
-        material = openliero.compose_material_mask(self.w, self.h, mat_layers, default_idx)
+        material = bytearray([default_idx & 0xFF]) * n
+        display = bytearray(display0)
+        owned_cov = [bytearray(n) for _ in rows]
+        for i in range(n):
+            li = owner[i]
+            if li == -1:
+                continue
+            owned_cov[li][i] = 1
+            _layer, mat_combo, _ac = rows[li]
+            if is_palette[li] and reps:
+                rgba = water_rgba[li]
+                k = openliero._nearest_color_index(
+                    (rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]), reps)
+                material[i] = (openliero.WATER_LO + k) & 0xFF
+                display[i * 4 + 3] = 0  # transparent -> palette colorAnim path
+            elif not is_palette[li]:
+                material[i] = (_key_to_index(self._combo_key(mat_combo)) or 0) & 0xFF
 
         palette = None
-        if any_pal and reps:
+        if reps:
             palette = _default_palette_list()
             for k in range(len(reps)):
                 palette[openliero.WATER_LO + k] = reps[k]
 
+        # ramp animation from each layer's OWNED (disjoint) coverage
+        anim_layers = []
+        for li, (_l, _m, anim_combo) in enumerate(rows):
+            choice = anim_combo.get_active_id()
+            ramp = int(choice[5:]) if choice and choice.startswith('ramp:') else 0
+            anim_layers.append((bytes(owned_cov[li]), ramp))
         ramps = anim = None
         if self.ramps and any(r > 0 for _c, r in anim_layers):
             mode = self.phase_combo.get_active_id() or 'color'
             anim = openliero.build_anim_rgba(self.w, self.h, anim_layers, phase_mode=mode,
                                              display_rgba=display0, ramps=self.ramps)
             ramps = self.ramps
-        return material, bytes(display), ramps, anim, palette
+        return bytes(material), bytes(display), ramps, anim, palette
 
     def _display(self):
         """The image composite as RGBA bytes, read once and cached."""
