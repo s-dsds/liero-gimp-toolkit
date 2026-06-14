@@ -23,10 +23,12 @@ def normalize_name(name: str) -> str:
 
 
 def classify_name(name: str) -> int | None:
+    # Whole-word match so "background" doesn't hit the DIRT alias "ground".
     s = normalize_name(name)
     for mat_name, needles in _NAME_RULES:
-        if any(n in s for n in needles):
-            return MATERIAL[mat_name]
+        for n in needles:
+            if re.search(r"\b" + re.escape(n) + r"\b", s):
+                return MATERIAL[mat_name]
     return None
 
 

@@ -112,3 +112,15 @@ def test_js_roundtrip_with_range_folding():
     expr = material_table_to_js(table)
     assert "..._range(189,208)" in expr
     assert parse_material_text(expr) == table
+
+
+def test_classify_name_word_boundary():
+    from liero_core.material import classify_name
+    from liero_core.defaults import MATERIAL
+    assert classify_name("background") == MATERIAL["BG"]      # not DIRT via "ground"
+    assert classify_name("my background art") == MATERIAL["BG"]
+    assert classify_name("rock_low") == MATERIAL["ROCK"]
+    assert classify_name("dirt") == MATERIAL["DIRT"]
+    assert classify_name("background dirt") == MATERIAL["BG_DIRT"]
+    assert classify_name("worm spawn") == MATERIAL["WORM"]
+    assert classify_name("nothing here") is None

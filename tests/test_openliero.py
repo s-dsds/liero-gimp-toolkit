@@ -301,3 +301,12 @@ def test_palette_anim_cycling_matches_engine():
     f8 = ol.render_frame_incremental(base, [], pcells, bytes(palrgb), 8)  # dist=1
     assert f8[0] == 40                                   # px0 now shows pal[171]
     assert f8[9] == 28                                   # px3 now shows pal[170]
+
+
+def test_per_ramp_phase_overrides_global():
+    r_sync = [{"shift": 0, "colors": ["#000000"], "phase": "sync"}]
+    r_rand = [{"shift": 0, "colors": ["#000000"], "phase": "random"}]
+    a_sync = ol.build_anim_rgba(1, 1, [(bytes([1]), 1)], default_phase=7, ramps=r_sync)
+    a_rand = ol.build_anim_rgba(1, 1, [(bytes([1]), 1)], default_phase=7, ramps=r_rand)
+    assert a_sync[1] == 7                              # sync -> default phase
+    assert a_rand[1] == (0 * 2654435761) & 0xFF        # random hash of px 0
