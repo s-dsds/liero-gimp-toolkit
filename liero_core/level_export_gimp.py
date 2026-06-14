@@ -36,6 +36,16 @@ PARASITE_NAME = 'liero-level-export-settings'
 _PHASE_MODES = [('color', 'From colour'), ('sync', 'Synced'),
                 ('wave', 'Wave'), ('random', 'Random')]
 _COLOR_DND = [Gtk.TargetEntry.new('LIERO_RAMP_COLOR', 0, 0)]
+_ALPHA01 = bytes([0] + [1] * 255)  # alpha byte -> 1 where >0 (coverage plane)
+_NOT01 = bytes([1] + [0] * 255)    # logical NOT of a 0/1 plane
+
+
+def _set_positions(plane):
+    """Yield indices where a 0/1 plane is set, skipping zero runs at C speed."""
+    i = plane.find(1)
+    while i != -1:
+        yield i
+        i = plane.find(1, i + 1)
 
 # Material choices offered per layer (label, key). key: int material, 'group:ID',
 # or None = skip (layer doesn't contribute to the mask).
@@ -120,6 +130,8 @@ class LevelExportDialog:
         self._pal = _default_palette_rgb()
         self._cycles = 0
         self._timer = None
+        self._play_start = 0
+        self._play_base = 0
         self._mode = _MODE_DISPLAY
         self._ready = False        # guards rebuilds during widget construction
         self._suspend = False      # set while programmatically refilling combos
@@ -573,32 +585,16 @@ class LevelExportDialog:
         self._rebuild_level()
 
     def _coverage(self, layer):
-        key = layer.get_id()
-        if key in self._cov_cache:
-            return self._cov_cache[key]
-        lw, lh = layer.get_width(), layer.get_height()
-        off = layer.get_offsets()
-        ox, oy = (off[1], off[2]) if len(off) == 3 else (off[0], off[1])
-        rect = Gegl.Rectangle.new(0, 0, lw, lh)
-        rgba = layer.get_buffer().get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP)
-        W, H = self.w, self.h
-        cov = bytearray(W * H)
-        for ly in range(lh):
-            iy = oy + ly
-            if iy < 0 or iy >= H:
-                continue
-            rowbase = ly * lw * 4
-            ibase = iy * W
-            for lx in range(lw):
-                ix = ox + lx
-                if 0 <= ix < W and rgba[rowbase + lx * 4 + 3] > 0:
-                    cov[ibase + ix] = 1
-        cov = bytes(cov)
-        self._cov_cache[key] = cov
-        return cov
+        key = ('cov', layer.get_id())
+        if key not in self._cov_cache:
+            self._cov_cache[key] = self._layer_rgba(layer)[3::4].translate(_ALPHA01)
+        return self._cov_cache[key]
 
     def _layer_rgba(self, layer):
-        """The layer's OWN pixels placed on the canvas (transparent elsewhere)."""
+        """The layer's OWN pixels placed on the canvas (transparent elsewhere).
+
+        Vectorized: copy whole rows (C-speed slices) rather than per pixel.
+        """
         key = ('rgba', layer.get_id())
         if key in self._cov_cache:
             return self._cov_cache[key]
@@ -606,20 +602,23 @@ class LevelExportDialog:
         off = layer.get_offsets()
         ox, oy = (off[1], off[2]) if len(off) == 3 else (off[0], off[1])
         rect = Gegl.Rectangle.new(0, 0, lw, lh)
-        src = layer.get_buffer().get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP)
+        src = bytes(layer.get_buffer().get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.CLAMP))
         W, H = self.w, self.h
-        out = bytearray(W * H * 4)
-        for ly in range(lh):
-            iy = oy + ly
-            if iy < 0 or iy >= H:
-                continue
-            for lx in range(lw):
-                ix = ox + lx
-                if 0 <= ix < W:
-                    si = (ly * lw + lx) * 4
-                    di = (iy * W + ix) * 4
-                    out[di:di + 4] = src[si:si + 4]
-        out = bytes(out)
+        if (ox, oy, lw, lh) == (0, 0, W, H):
+            out = src                       # already canvas-sized: no placement
+        else:
+            buf = bytearray(W * H * 4)
+            lx0 = max(0, -ox)
+            lx1 = min(lw, W - ox)
+            for ly in range(lh):
+                iy = oy + ly
+                if iy < 0 or iy >= H or lx1 <= lx0:
+                    continue
+                s = (ly * lw + lx0) * 4
+                e = (ly * lw + lx1) * 4
+                d = (iy * W + ox + lx0) * 4
+                buf[d:d + (e - s)] = src[s:e]
+            out = bytes(buf)
         self._cov_cache[key] = out
         return out
 
@@ -627,70 +626,65 @@ class LevelExportDialog:
         n = self.w * self.h
         rows = self.layer_rows  # top-to-bottom (get_layers()[0] is topmost)
         display0 = self._display()
-        band = openliero.WATER_HI - openliero.WATER_LO + 1
+        default_idx = _key_to_index(self._combo_key(self.uncovered_combo)) or 160
 
-        # ownership: the topmost CONTRIBUTING layer at each pixel (a 'skip'
-        # material with no animation doesn't contribute / doesn't own).
-        owner = [-1] * n
-        for li, (layer, mc, ac) in enumerate(rows):
-            if ac.get_active_id() != 'palette' and self._combo_key(mc) is None:
+        # Single top-to-bottom pass, all whole-plane byte ops (no per-pixel loop):
+        # each layer owns the pixels it covers that no higher layer claimed.
+        claimed = bytes(n)
+        material = bytes([default_idx & 0xFF]) * n
+        anim_layers = []
+        water_owns = []            # (owned-plane, layer's own RGBA) for water layers
+        for layer, mat_combo, anim_combo in rows:
+            choice = anim_combo.get_active_id()
+            is_pal = (choice == 'palette')
+            key = self._combo_key(mat_combo)
+            if not is_pal and key is None:        # 'skip': contributes nothing
                 continue
             cov = self._coverage(layer)
-            for i in range(n):
-                if cov[i] and owner[i] == -1:
-                    owner[i] = li
+            owned = openliero.band_and(cov, claimed.translate(_NOT01))
+            claimed = openliero.band_or(claimed, cov)
+            ramp = int(choice[5:]) if choice.startswith('ramp:') else 0
+            anim_layers.append((owned, ramp))
+            if is_pal:
+                water_owns.append((owned, self._layer_rgba(layer)))
+            else:
+                material = openliero.band_select(owned, bytes([_key_to_index(key) & 0xFF]) * n,
+                                                 material)
 
-        is_palette = [ac.get_active_id() == 'palette' for (_l, _m, ac) in rows]
-
-        # water band reps from each water layer's OWN owned pixels (not the
-        # composite — the composite shows whatever sits on top).
-        water_rgba = {}
-        cols = []
-        for i in range(n):
-            li = owner[i]
-            if li != -1 and is_palette[li]:
-                if li not in water_rgba:
-                    water_rgba[li] = self._layer_rgba(rows[li][0])
-                rgba = water_rgba[li]
-                cols.append((rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]))
-        reps = openliero.quantize_band_colors(cols, band) if cols else []
-        while reps and len(reps) < band:
-            reps.append(reps[-1])
-
-        default_idx = _key_to_index(self._combo_key(self.uncovered_combo)) or 160
-        material = bytearray([default_idx & 0xFF]) * n
-        display = bytearray(display0)
-        owned_cov = [bytearray(n) for _ in rows]
-        for i in range(n):
-            li = owner[i]
-            if li == -1:
-                continue
-            owned_cov[li][i] = 1
-            _layer, mat_combo, _ac = rows[li]
-            if is_palette[li] and reps:
-                rgba = water_rgba[li]
-                k = openliero._nearest_color_index(
-                    (rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]), reps)
-                material[i] = (openliero.WATER_LO + k) & 0xFF
-                display[i * 4 + 3] = 0  # transparent -> palette colorAnim path
-            elif not is_palette[li]:
-                material[i] = (_key_to_index(self._combo_key(mat_combo)) or 0) & 0xFF
-
+        # water: quantize each water layer's OWN owned colours into the band,
+        # set those pixels to 168-171, leave them transparent (palette colorAnim).
         palette = None
-        if reps:
-            palette = _default_palette_list()
-            for k in range(len(reps)):
-                palette[openliero.WATER_LO + k] = reps[k]
+        new_alpha = bytes(display0[3::4])
+        if water_owns:
+            band = openliero.WATER_HI - openliero.WATER_LO + 1
+            cols = []
+            for owned, rgba in water_owns:
+                for i in _set_positions(owned):
+                    cols.append((rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]))
+            reps = openliero.quantize_band_colors(cols, band)
+            while reps and len(reps) < band:
+                reps.append(reps[-1])
+            if reps:
+                band_idx = bytearray(material)
+                all_water = bytes(n)
+                for owned, rgba in water_owns:
+                    for i in _set_positions(owned):
+                        k = openliero._nearest_color_index(
+                            (rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]), reps)
+                        band_idx[i] = openliero.WATER_LO + k
+                    all_water = openliero.band_or(all_water, owned)
+                material = openliero.band_select(all_water, bytes(band_idx), material)
+                new_alpha = openliero.band_and(new_alpha, all_water.translate(openliero._Z_TO_FF))
+                palette = _default_palette_list()
+                for k in range(len(reps)):
+                    palette[openliero.WATER_LO + k] = reps[k]
+        display = bytearray(display0)
+        display[3::4] = new_alpha
 
-        # ramp animation from each layer's OWNED (disjoint) coverage
-        anim_layers = []
-        for li, (_l, _m, anim_combo) in enumerate(rows):
-            choice = anim_combo.get_active_id()
-            ramp = int(choice[5:]) if choice and choice.startswith('ramp:') else 0
-            anim_layers.append((bytes(owned_cov[li]), ramp))
+        # ramp animation: only the animated layers (owned coverages are disjoint)
+        anim_layers = [(own, r) for own, r in anim_layers if r > 0]
         ramps = anim = None
-        if self.ramps and any(r > 0 for _c, r in anim_layers):
-            # phase is per-ramp now (ramp['phase']); build_anim_rgba reads it
+        if self.ramps and anim_layers:
             anim = openliero.build_anim_rgba(self.w, self.h, anim_layers,
                                              display_rgba=display0, ramps=self.ramps)
             ramps = self.ramps
@@ -802,14 +796,19 @@ class LevelExportDialog:
     def _on_play(self, btn):
         if btn.get_active() and self._mode == _MODE_ANIM and (self._ramp_cells or self._pal_cells):
             btn.set_label("⏸ Pause")
+            # drive cycles off the wall clock so playback matches the game's
+            # 70 cycles/second regardless of timer jitter.
+            self._play_start = GLib.get_monotonic_time()
+            self._play_base = self._cycles
             if self._timer is None:
-                self._timer = GLib.timeout_add(120, self._tick)
+                self._timer = GLib.timeout_add(33, self._tick)
         else:
             btn.set_label("▶ Play")
             self._stop_timer()
 
     def _tick(self):
-        self._cycles += 1
+        elapsed_us = GLib.get_monotonic_time() - self._play_start
+        self._cycles = self._play_base + (elapsed_us * 70) // 1_000_000
         self._render()
         return True
 
