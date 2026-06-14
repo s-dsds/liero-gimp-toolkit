@@ -310,3 +310,15 @@ def test_per_ramp_phase_overrides_global():
     a_rand = ol.build_anim_rgba(1, 1, [(bytes([1]), 1)], default_phase=7, ramps=r_rand)
     assert a_sync[1] == 7                              # sync -> default phase
     assert a_rand[1] == (0 * 2654435761) & 0xFF        # random hash of px 0
+
+
+def test_band_ops():
+    a = bytes([1, 0, 1, 0])
+    b = bytes([1, 1, 0, 0])
+    assert ol.band_and(a, b) == bytes([1, 0, 0, 0])
+    assert ol.band_or(a, b) == bytes([1, 1, 1, 0])
+    # band_select: a where mask!=0 else b
+    mask = bytes([1, 0, 1, 0])
+    x = bytes([10, 20, 30, 40])
+    y = bytes([50, 60, 70, 80])
+    assert ol.band_select(mask, x, y) == bytes([10, 60, 30, 80])
