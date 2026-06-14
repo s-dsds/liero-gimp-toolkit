@@ -199,6 +199,17 @@ class LevelExportDialog:
         for b in (add_ramp, save_j, load_j):
             rbtns.pack_start(b, False, False, 0)
         left.pack_start(rbtns, False, False, 0)
+        phase_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        phase_row.pack_start(Gtk.Label(label="Phase (Green channel):", xalign=0),
+                             False, False, 0)
+        self.phase_combo = Gtk.ComboBoxText()
+        for key, label in (('color', 'From colour (keeps the art)'), ('sync', 'Synced'),
+                           ('wave', 'Position wave'), ('random', 'Random')):
+            self.phase_combo.append(key, label)
+        self.phase_combo.set_active_id('color')
+        self.phase_combo.connect('changed', lambda _c: self._rebuild_level())
+        phase_row.pack_start(self.phase_combo, True, True, 0)
+        left.pack_start(phase_row, False, False, 0)
         self._rebuild_ramps_ui()
 
         # --- preview controls ---
@@ -528,7 +539,9 @@ class LevelExportDialog:
         material = openliero.compose_material_mask(self.w, self.h, mat_layers, default_idx)
         animated = any(r > 0 for _c, r in anim_layers)
         if self.ramps and animated:
-            anim = openliero.build_anim_rgba(self.w, self.h, anim_layers)
+            mode = self.phase_combo.get_active_id() or 'color'
+            anim = openliero.build_anim_rgba(self.w, self.h, anim_layers, phase_mode=mode,
+                                             display_rgba=self._display(), ramps=self.ramps)
             return material, self.ramps, anim
         return material, None, None
 
