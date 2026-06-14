@@ -214,3 +214,24 @@ def test_size_bounds_enforced():
         ol.build_level(0, 10, b"", b"")
     with pytest.raises(ValueError, match="outside"):
         ol.build_level(ol.MAX_DIM + 1, 1, bytes(ol.MAX_DIM + 1), bytes((ol.MAX_DIM + 1) * 4))
+
+
+def test_incremental_anim_matches_full_render():
+    w, h = 3, 1
+    disp = [(50, 60, 70, 255), (0, 0, 0, 0), (0, 0, 0, 0)]
+    ramps = [{"shift": 0, "colors": ["#FF0000", "#00FF00", "#0000FF"]}]
+    anim = [(0, 0, 0, 0), (0, 0, 0, 0), (1, 1, 0, 255)]
+    data = ol.build_level(w, h, bytes([12, 19, 168]), _rgba(disp), ramps, _rgba(anim))
+    level = ol.extract_level(data)
+    pal = _pal_with({19: (11, 22, 33)})
+    base = ol.render_frame_rgb(level, pal, 0)
+    cells = ol.animation_cells(level)
+    assert len(cells) == 1
+    for cyc in (0, 1, 2, 5, 17):
+        assert ol.render_anim_frame(base, cells, cyc) == ol.render_frame_rgb(level, pal, cyc)
+
+
+def test_ordered_unique_colors():
+    rgba = _rgba([(10, 10, 10, 255), (200, 200, 200, 255), (99, 99, 99, 0)])
+    assert ol.ordered_unique_colors(rgba) == ['#0A0A0A', '#C8C8C8']  # luminance order, transparent skipped
+    assert ol.ordered_unique_colors(_rgba([(0, 0, 0, 0)])) == []
