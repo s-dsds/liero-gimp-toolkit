@@ -21,7 +21,8 @@ gi.require_version('Gimp', '3.0')
 gi.require_version('GimpUi', '3.0')
 gi.require_version('Gegl', '0.4')
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gimp, GimpUi, Gegl, GLib, Gtk  # noqa: E402
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gimp, GimpUi, Gegl, GLib, Gtk, Gdk  # noqa: E402
 
 from . import openliero  # noqa: E402
 from .studio import PreviewCanvas, colors_from_gimp_palette  # noqa: E402
@@ -32,6 +33,9 @@ from .gimp_colors import color_from_rgb8, rgb8_from_color  # noqa: E402
 RESP_EXPORT = 100
 _MODE_DISPLAY, _MODE_MASK, _MODE_ANIM = 'display', 'mask', 'anim'
 PARASITE_NAME = 'liero-level-export-settings'
+_PHASE_MODES = [('color', 'From colour'), ('sync', 'Synced'),
+                ('wave', 'Wave'), ('random', 'Random')]
+_COLOR_DND = [Gtk.TargetEntry.new('LIERO_RAMP_COLOR', 0, 0)]
 
 # Material choices offered per layer (label, key). key: int material, 'group:ID',
 # or None = skip (layer doesn't contribute to the mask).
@@ -63,6 +67,11 @@ def _key_to_index(key):
 def _default_key_for(name):
     mat = classify_name(name or '')
     return mat if mat is not None else None
+
+
+def _default_anim_for(name):
+    # a layer named "water" defaults to the free palette colorAnim shimmer
+    return 'palette' if 'water' in (name or '').lower() else 'none'
 
 
 def _hex_to_gegl(hx):
@@ -207,17 +216,6 @@ class LevelExportDialog:
         for b in (add_ramp, save_j, load_j):
             rbtns.pack_start(b, False, False, 0)
         left.pack_start(rbtns, False, False, 0)
-        phase_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        phase_row.pack_start(Gtk.Label(label="Phase (Green channel):", xalign=0),
-                             False, False, 0)
-        self.phase_combo = Gtk.ComboBoxText()
-        for key, label in (('color', 'From colour (keeps the art)'), ('sync', 'Synced'),
-                           ('wave', 'Position wave'), ('random', 'Random')):
-            self.phase_combo.append(key, label)
-        self.phase_combo.set_active_id('color')
-        self.phase_combo.connect('changed', lambda _c: self._rebuild_level())
-        phase_row.pack_start(self.phase_combo, True, True, 0)
-        left.pack_start(phase_row, False, False, 0)
         self._rebuild_ramps_ui()
 
         # --- preview controls ---
@@ -296,7 +294,7 @@ class LevelExportDialog:
                 lid = layer.get_id()
                 name = layer.get_name() or 'layer'
                 mat_key = prev[lid][0] if lid in prev else _default_key_for(name)
-                anim_id = prev[lid][1] if lid in prev else 'none'
+                anim_id = prev[lid][1] if lid in prev else _default_anim_for(name)
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
                 row.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
                 mat_combo = self._material_combo(default_key=mat_key)
@@ -368,6 +366,13 @@ class LevelExportDialog:
         shift.set_value(ramp.get('shift', 0))
         shift.connect('value-changed', self._on_shift, ri)
         top.pack_start(shift, False, False, 0)
+        phase = Gtk.ComboBoxText()
+        for key, label in _PHASE_MODES:
+            phase.append(key, label)
+        phase.set_active_id(ramp.get('phase', 'color'))
+        phase.set_tooltip_text("Phase (Green channel): how this ramp's pixels are staggered")
+        phase.connect('changed', self._on_ramp_phase, ri)
+        top.pack_start(phase, False, False, 0)
         rm = Gtk.Button(label="✕ ramp")
         rm.connect('clicked', self._on_remove_ramp, ri)
         top.pack_end(rm, False, False, 0)
@@ -381,7 +386,13 @@ class LevelExportDialog:
         for ci, hx in enumerate(ramp['colors']):
             btn = GimpUi.ColorButton.new(f"Ramp {ri + 1} colour {ci + 1}", 22, 16,
                                          _hex_to_gegl(hx), GimpUi.ColorAreaType.FLAT)
+            btn.set_tooltip_text("Left-click: edit · Right-click: menu · Drag: reorder")
             btn.connect('color-changed', self._on_color_set, ri, ci)
+            btn.connect('button-press-event', self._on_color_press, ri, ci)
+            btn.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _COLOR_DND, Gdk.DragAction.MOVE)
+            btn.drag_dest_set(Gtk.DestDefaults.ALL, _COLOR_DND, Gdk.DragAction.MOVE)
+            btn.connect('drag-data-get', self._color_drag_get, ri, ci)
+            btn.connect('drag-data-received', self._color_drag_received, ri, ci)
             colors.pack_start(btn, False, False, 0)
         add_c = Gtk.Button(label="+")
         add_c.connect('clicked', self._on_add_color, ri)
@@ -394,9 +405,58 @@ class LevelExportDialog:
         return box
 
     def _on_add_ramp(self, _b):
-        self.ramps.append({'shift': 2, 'colors': ['#1A3A6A', '#2A4A7A']})
+        self.ramps.append({'shift': 2, 'colors': ['#1A3A6A', '#2A4A7A'], 'phase': 'color'})
         self._rebuild_ramps_ui()
         self._rebuild_level()
+
+    def _on_ramp_phase(self, combo, ri):
+        self.ramps[ri]['phase'] = combo.get_active_id()
+        self._rebuild_level()
+
+    # ---- ramp colour reorder / delete ---------------------------------------
+    def _on_color_press(self, widget, event, ri, ci):
+        if event.button != 3:          # only intercept right-click
+            return False
+        menu = Gtk.Menu()
+        for label, cb in (("Delete colour", self._color_delete),
+                          ("Move left", self._color_move_left),
+                          ("Move right", self._color_move_right)):
+            item = Gtk.MenuItem(label=label)
+            item.connect('activate', cb, ri, ci)
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def _color_delete(self, _mi, ri, ci):
+        if len(self.ramps[ri]['colors']) > 1:
+            del self.ramps[ri]['colors'][ci]
+            self._rebuild_ramps_ui()
+            self._rebuild_level()
+
+    def _move_color(self, ri, src, dst):
+        cols = self.ramps[ri]['colors']
+        if 0 <= src < len(cols) and 0 <= dst < len(cols) and src != dst:
+            cols.insert(dst, cols.pop(src))
+            self._rebuild_ramps_ui()
+            self._rebuild_level()
+
+    def _color_move_left(self, _mi, ri, ci):
+        self._move_color(ri, ci, ci - 1)
+
+    def _color_move_right(self, _mi, ri, ci):
+        self._move_color(ri, ci, ci + 1)
+
+    def _color_drag_get(self, _widget, _ctx, data, _info, _time, ri, ci):
+        data.set(data.get_target(), 8, f"{ri}:{ci}".encode())
+
+    def _color_drag_received(self, _widget, _ctx, _x, _y, data, _info, _time, ri, ci):
+        try:
+            sri, sci = (int(v) for v in bytes(data.get_data()).decode().split(':'))
+        except Exception:
+            return
+        if sri == ri:                  # reorder within the same ramp only
+            self._move_color(ri, sci, ci)
 
     def _on_remove_ramp(self, _b, ri):
         del self.ramps[ri]
@@ -630,8 +690,8 @@ class LevelExportDialog:
             anim_layers.append((bytes(owned_cov[li]), ramp))
         ramps = anim = None
         if self.ramps and any(r > 0 for _c, r in anim_layers):
-            mode = self.phase_combo.get_active_id() or 'color'
-            anim = openliero.build_anim_rgba(self.w, self.h, anim_layers, phase_mode=mode,
+            # phase is per-ramp now (ramp['phase']); build_anim_rgba reads it
+            anim = openliero.build_anim_rgba(self.w, self.h, anim_layers,
                                              display_rgba=display0, ramps=self.ramps)
             ramps = self.ramps
         return bytes(material), bytes(display), ramps, anim, palette
@@ -794,7 +854,6 @@ class LevelExportDialog:
         data = {
             'mask_source': self.mask_source,
             'ignore_hidden': self.ignore_hidden_check.get_active(),
-            'phase': self.phase_combo.get_active_id(),
             'uncovered': self._combo_key(self.uncovered_combo),
             'ramps': self.ramps,
             'layers': {(layer.get_name() or ''):
@@ -821,8 +880,6 @@ class LevelExportDialog:
             if isinstance(data.get('ramps'), list):
                 self.ramps = data['ramps']
                 self._rebuild_ramps_ui()
-            if data.get('phase'):
-                self.phase_combo.set_active_id(data['phase'])
             if data.get('uncovered') is not None:
                 self._set_combo_key(self.uncovered_combo, data['uncovered'])
             if 'ignore_hidden' in data:

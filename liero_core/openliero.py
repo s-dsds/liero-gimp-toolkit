@@ -390,8 +390,13 @@ def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0, *,
     out = bytearray(n * 4)
     claimed = bytearray(n)
     ph0 = default_phase & 0xFF
-    ramp_cols = ([cols for _shift, cols in _ramps_to_rgb(ramps)]
-                 if (phase_mode == 'color' and ramps) else None)
+    ramp_cols = [cols for _shift, cols in _ramps_to_rgb(ramps)] if ramps else None
+
+    def _mode(r):  # per-ramp phase (ramp['phase']) overrides the global default
+        if ramps and 0 <= r - 1 < len(ramps) and ramps[r - 1].get('phase'):
+            return ramps[r - 1]['phase']
+        return phase_mode
+
     for cov, ramp in layers:
         if len(cov) != n:
             raise ValueError("coverage size mismatch")
@@ -400,11 +405,12 @@ def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0, *,
                 claimed[i] = 1
                 if ramp <= 0:
                     continue
-                if phase_mode == 'wave':
+                mode = _mode(ramp)
+                if mode == 'wave':
                     ph = ((i % width) + (i // width)) & 0xFF
-                elif phase_mode == 'random':
+                elif mode == 'random':
                     ph = (i * 2654435761) & 0xFF  # Knuth multiplicative hash
-                elif phase_mode == 'color' and ramp_cols and ramp - 1 < len(ramp_cols) \
+                elif mode == 'color' and ramp_cols and ramp - 1 < len(ramp_cols) \
                         and ramp_cols[ramp - 1] and display_rgba is not None:
                     rgb = (display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2])
                     ph = _nearest_color_index(rgb, ramp_cols[ramp - 1]) & 0xFF
