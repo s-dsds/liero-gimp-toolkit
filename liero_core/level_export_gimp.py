@@ -90,6 +90,11 @@ def _default_palette_rgb():
         return bytes(256 * 3)
 
 
+def _default_palette_list():
+    pal = _default_palette_rgb()
+    return [(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]) for i in range(256)]
+
+
 class LevelExportDialog:
     def __init__(self, image):
         self.image = image
@@ -111,7 +116,8 @@ class LevelExportDialog:
         self._display_rgba = None  # cached image composite (read once)
         self._mask_cache = {}      # cached indexed-mask indices by image id
         self._anim_base = None     # static preview frame (cycles=0), recomputed per rebuild
-        self._anim_cells = []      # animated pixels for fast per-tick update
+        self._ramp_cells = []      # MODERNLV ramp pixels for fast per-tick update
+        self._pal_cells = []       # colorAnim (palette-band) pixels for per-tick update
         self._build()
 
     # ---- UI -----------------------------------------------------------------
@@ -273,7 +279,7 @@ class LevelExportDialog:
     def _build_layer_rows(self):
         # remember current per-layer assignments so toggling the filter (or
         # rebuilding) doesn't lose them
-        prev = {layer.get_id(): (self._combo_key(mc), rc.get_active())
+        prev = {layer.get_id(): (self._combo_key(mc), rc.get_active_id())
                 for layer, mc, rc in self.layer_rows}
         for child in list(self.layer_rows_box.get_children()):
             self.layer_rows_box.remove(child)
@@ -287,13 +293,13 @@ class LevelExportDialog:
                 lid = layer.get_id()
                 name = layer.get_name() or 'layer'
                 mat_key = prev[lid][0] if lid in prev else _default_key_for(name)
-                ramp_idx = prev[lid][1] if lid in prev else 0
+                anim_id = prev[lid][1] if lid in prev else 'none'
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
                 row.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
                 mat_combo = self._material_combo(default_key=mat_key)
                 row.pack_start(mat_combo, False, False, 0)
                 ramp_combo = Gtk.ComboBoxText()
-                self._fill_ramp_combo(ramp_combo, ramp_idx)
+                self._fill_ramp_combo(ramp_combo, anim_id)
                 ramp_combo.connect('changed', lambda _c: self._rebuild_level())
                 row.pack_start(ramp_combo, False, False, 0)
                 self.layer_rows_box.pack_start(row, False, False, 0)
@@ -308,12 +314,14 @@ class LevelExportDialog:
         self._build_layer_rows()
         self._rebuild_level()
 
-    def _fill_ramp_combo(self, combo, keep):
+    def _fill_ramp_combo(self, combo, keep_id):
         combo.remove_all()
-        combo.append_text('none')
+        combo.append('none', 'None')
+        combo.append('palette', 'Palette colorAnim (water)')
         for i in range(len(self.ramps)):
-            combo.append_text(f"Ramp {i + 1}")
-        combo.set_active(keep if 0 <= keep <= len(self.ramps) else 0)
+            combo.append(f'ramp:{i + 1}', f'Ramp {i + 1}')
+        if not combo.set_active_id(keep_id or 'none'):
+            combo.set_active_id('none')
 
     def _fill_mask_combo(self):
         self.mask_combo.remove_all()
@@ -343,7 +351,7 @@ class LevelExportDialog:
         self._suspend = True
         try:
             for _layer, _mat, ramp_combo in self.layer_rows:
-                cur = ramp_combo.get_active()
+                cur = ramp_combo.get_active_id()
                 self._fill_ramp_combo(ramp_combo, cur)
         finally:
             self._suspend = False
@@ -527,23 +535,59 @@ class LevelExportDialog:
         return cov
 
     def _material_from_layers(self):
+        n = self.w * self.h
+        display0 = self._display()
+        # pre-scan palette-colorAnim layers -> union coverage, quantize the
+        # water band (168-171) from their painted colours.
+        union = bytearray(n)
+        any_pal = False
+        for layer, _mc, anim_combo in self.layer_rows:
+            if anim_combo.get_active_id() == 'palette':
+                any_pal = True
+                cov = self._coverage(layer)
+                for i in range(n):
+                    if cov[i]:
+                        union[i] = 1
+        reps, band_idx = ([], bytes(n))
+        if any_pal:
+            reps, band_idx = openliero.fit_palette_anim_band(
+                bytes(union), display0, openliero.WATER_LO, openliero.WATER_HI)
+
+        display = bytearray(display0)
         mat_layers, anim_layers = [], []
-        for layer, mat_combo, ramp_combo in self.layer_rows:
+        for layer, mat_combo, anim_combo in self.layer_rows:
+            choice = anim_combo.get_active_id()
+            cov = self._coverage(layer)
+            if choice == 'palette':
+                mat_layers.append((cov, band_idx))   # per-pixel water indices
+                anim_layers.append((cov, 0))         # blocks lower layers; no ramp
+                for i in range(n):
+                    if cov[i]:
+                        display[i * 4 + 3] = 0        # transparent -> palette colorAnim path
+                continue
             key = self._combo_key(mat_combo)
             if key is None:
                 continue
-            cov = self._coverage(layer)
             mat_layers.append((cov, _key_to_index(key)))
-            anim_layers.append((cov, ramp_combo.get_active()))  # 0 = none
+            ramp = int(choice[5:]) if choice and choice.startswith('ramp:') else 0
+            anim_layers.append((cov, ramp))
+
         default_idx = _key_to_index(self._combo_key(self.uncovered_combo)) or 160
         material = openliero.compose_material_mask(self.w, self.h, mat_layers, default_idx)
-        animated = any(r > 0 for _c, r in anim_layers)
-        if self.ramps and animated:
+
+        palette = None
+        if any_pal and reps:
+            palette = _default_palette_list()
+            for k in range(len(reps)):
+                palette[openliero.WATER_LO + k] = reps[k]
+
+        ramps = anim = None
+        if self.ramps and any(r > 0 for _c, r in anim_layers):
             mode = self.phase_combo.get_active_id() or 'color'
             anim = openliero.build_anim_rgba(self.w, self.h, anim_layers, phase_mode=mode,
-                                             display_rgba=self._display(), ramps=self.ramps)
-            return material, self.ramps, anim
-        return material, None, None
+                                             display_rgba=display0, ramps=self.ramps)
+            ramps = self.ramps
+        return material, bytes(display), ramps, anim, palette
 
     def _display(self):
         """The image composite as RGBA bytes, read once and cached."""
@@ -558,18 +602,16 @@ class LevelExportDialog:
         return self._mask_cache[key]
 
     def _gather(self):
-        """Return (material, display_rgba, ramps, anim_rgba) or None if not ready."""
-        display = self._display()
+        """Return (material, display_rgba, ramps, anim_rgba, palette) or None."""
         if self.mask_source == 'indexed':
             if self.mask_image is None or \
                     (self.mask_image.get_width(), self.mask_image.get_height()) != (self.w, self.h):
                 return None
             material = self._indexed_mask(self.mask_image)
             ramps = self.ramps if self.ramps else None
-            return material, display, ramps, None
+            return material, self._display(), ramps, None, None
         # layers source
-        material, ramps, anim = self._material_from_layers()
-        return material, display, ramps, anim
+        return self._material_from_layers()
 
     def _rebuild_level(self):
         """Coalesce many rapid changes into one rebuild on the idle loop.
@@ -596,23 +638,30 @@ class LevelExportDialog:
             self.status.set_text("Select an indexed material mask of matching size.")
             self.canvas.render_rgb(b'\x20' * (self.w * self.h * 3))
             return
-        material, display, ramps, anim = got
+        material, display, ramps, anim, palette = got
         try:
-            data = openliero.build_level(self.w, self.h, material, display, ramps, anim)
+            data = openliero.build_level(self.w, self.h, material, display, ramps, anim, palette)
             self._level = openliero.extract_level(data)
         except Exception as exc:
             self._level = None
             self.export_btn.set_sensitive(False)
             self.status.set_text(f"Cannot build level: {exc}")
             return
-        if self.mask_source == 'indexed' and self.mask_image is not None:
+        # preview palette: the level's own (POWERLEVEL) palette if any, else the
+        # indexed mask's colormap, else the classic default.
+        if self._level.get('palette'):
+            self._pal = bytes(c for rgb in self._level['palette'] for c in rgb)
+        elif self.mask_source == 'indexed' and self.mask_image is not None:
             self._pal = _palette_rgb_indexed(self.mask_image)
+        else:
+            self._pal = _default_palette_rgb()
         # precompute the static frame + animated cells once, so preview ticks
         # only rewrite animated pixels (a full-frame render each tick freezes).
         self._anim_base = openliero.render_frame_rgb(self._level, self._pal, 0)
-        self._anim_cells = openliero.animation_cells(self._level)
+        self._ramp_cells = openliero.animation_cells(self._level)
+        self._pal_cells = openliero.palette_anim_cells(self._level)
         self._cycles = 0
-        n_anim = len(self._anim_cells)
+        n_anim = len(self._ramp_cells) + len(self._pal_cells)
         self.export_btn.set_sensitive(True)
         self.play_btn.set_sensitive(n_anim > 0)
         self.status.set_text(f"Ready: {self.w}×{self.h}, "
@@ -636,14 +685,15 @@ class LevelExportDialog:
             return
         if self._mode == _MODE_MASK:
             rgb = openliero.material_mask_rgb(self._level['material'])
-        elif self._mode == _MODE_ANIM and self._anim_cells:
-            rgb = openliero.render_anim_frame(self._anim_base, self._anim_cells, self._cycles)
+        elif self._mode == _MODE_ANIM and (self._ramp_cells or self._pal_cells):
+            rgb = openliero.render_frame_incremental(self._anim_base, self._ramp_cells,
+                                                     self._pal_cells, self._pal, self._cycles)
         else:  # display, or animation with nothing animated -> the static frame
             rgb = self._anim_base
         self.canvas.render_rgb(rgb)
 
     def _on_play(self, btn):
-        if btn.get_active() and self._mode == _MODE_ANIM and self._anim_cells:
+        if btn.get_active() and self._mode == _MODE_ANIM and (self._ramp_cells or self._pal_cells):
             btn.set_label("⏸ Pause")
             if self._timer is None:
                 self._timer = GLib.timeout_add(120, self._tick)
@@ -666,7 +716,7 @@ class LevelExportDialog:
         got = self._gather()
         if got is None:
             return
-        material, display, ramps, anim = got
+        material, display, ramps, anim, palette = got
         chooser = Gtk.FileChooserDialog(title='Export OpenLiero level',
                                         action=Gtk.FileChooserAction.SAVE)
         chooser.add_button('_Cancel', Gtk.ResponseType.CANCEL)
@@ -677,9 +727,10 @@ class LevelExportDialog:
             path = chooser.get_filename()
             chooser.destroy()
             try:
-                openliero.write_level(path, self.w, self.h, material, display, ramps, anim)
+                openliero.write_level(path, self.w, self.h, material, display, ramps, anim, palette)
                 Gimp.message(f"Wrote {Path(path).name} ({self.w}×{self.h}, MODERNLV"
-                             f"{', animated' if anim else ''}).")
+                             f"{', ramp-animated' if anim else ''}"
+                             f"{', colorAnim water' if palette else ''}).")
             except Exception as exc:
                 Gimp.message(f"Export failed: {exc}")
         else:

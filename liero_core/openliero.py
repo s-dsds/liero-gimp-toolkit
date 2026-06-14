@@ -40,8 +40,13 @@ import struct
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
-from .defaults import DEFAULT_MATERIALS, MATERIAL
+from .defaults import DEFAULT_MATERIALS, MATERIAL, DEFAULT_COLOR_ANIM
 from .material import indices_for_material
+
+# colorAnim (from,to) bands the OpenLiero default TC cycles; water is (168,171).
+COLOR_ANIM_RANGES = [(DEFAULT_COLOR_ANIM[i], DEFAULT_COLOR_ANIM[i + 1])
+                     for i in range(0, len(DEFAULT_COLOR_ANIM), 2)]
+WATER_LO, WATER_HI = 168, 171
 
 LEGACY_W, LEGACY_H = 504, 350
 MAX_DIM = 4096
@@ -89,6 +94,7 @@ def build_level(
     display_rgba: bytes,
     ramps: Optional[List[Dict]] = None,
     anim_rgba: Optional[bytes] = None,
+    palette: Optional[List] = None,
 ) -> bytes:
     """Serialize a MODERNLV OpenLiero level, byte-identical to lev_gen.py.
 
@@ -146,6 +152,12 @@ def build_level(
         out += struct.pack("<H", width)
         out += struct.pack("<H", height)
     out += material
+    if palette is not None:
+        if len(palette) < 256:
+            raise ValueError(f"palette needs 256 entries, got {len(palette)}")
+        out += POWERLEVEL_MAGIC
+        for r, g, b in palette[:256]:  # 6-bit VGA, as lev_gen.py's load_pal writes
+            out += bytes(((r >> 2) & 0x3F, (g >> 2) & 0x3F, (b >> 2) & 0x3F))
     out += MODERNLV_MAGIC
     out += dd
     out += dv
@@ -161,9 +173,10 @@ def build_level(
     return bytes(out)
 
 
-def write_level(path, width, height, material, display_rgba, ramps=None, anim_rgba=None) -> None:
+def write_level(path, width, height, material, display_rgba, ramps=None, anim_rgba=None,
+                palette=None) -> None:
     """build_level(...) written to disk."""
-    data = build_level(width, height, material, display_rgba, ramps, anim_rgba)
+    data = build_level(width, height, material, display_rgba, ramps, anim_rgba, palette)
     Path(path).write_bytes(data)
 
 
@@ -194,13 +207,17 @@ def extract_level(data: bytes) -> Dict:
         "width": width, "height": height,
         "material": data[body:body + cells],
         "display_data": None, "display_valid": None,
-        "ramps": [], "display_anim": None,
+        "ramps": [], "display_anim": None, "palette": None,
     }
     rest = data[body + cells:]
     pos = 0
     while pos < len(rest):
         if rest[pos:pos + 10] == POWERLEVEL_MAGIC:
-            pos += 10 + 768  # skip palette; out of scope here
+            pal6 = rest[pos + 10:pos + 10 + 768]
+            if len(pal6) == 768:  # expand 6-bit VGA back to 8-bit
+                result["palette"] = [((pal6[i * 3] & 0x3F) << 2, (pal6[i * 3 + 1] & 0x3F) << 2,
+                                      (pal6[i * 3 + 2] & 0x3F) << 2) for i in range(256)]
+            pos += 10 + 768
         elif rest[pos:pos + 8] == MODERNLV_MAGIC:
             pos += 8
             dd = rest[pos:pos + cells * 4]
@@ -335,10 +352,10 @@ def compose_material_mask(width: int, height: int, layers, default_index: int = 
     for cov, idx in layers:
         if len(cov) != n:
             raise ValueError("coverage size mismatch")
-        idx &= 0xFF
+        per_pixel = not isinstance(idx, int)  # idx may be a per-pixel index array
         for i in range(n):
             if cov[i] and not claimed[i]:
-                out[i] = idx
+                out[i] = (idx[i] if per_pixel else idx) & 0xFF
                 claimed[i] = 1
     return bytes(out)
 
@@ -463,3 +480,79 @@ def ordered_unique_colors(rgba: bytes, max_colors: int = 64) -> List[str]:
         step = len(colors) / max_colors
         colors = [colors[int(k * step)] for k in range(max_colors)]
     return ['#%02X%02X%02X' % c for c in colors]
+
+
+# --- Option A: palette colorAnim (water shimmer via POWERLEVEL band) ---------
+# OpenLiero rotates the palette entries in each colorAnim band every 8 frames
+# (game.cpp RotateFrom). Put the map's water colours at indices 168-171 (a
+# POWERLEVEL palette) and leave those pixels transparent in the display; the
+# engine then shimmers them for free, in the map's own colours.
+
+def quantize_band_colors(colors, k):
+    """Up to k representative colours (luminance-ordered) from a colour list."""
+    uniq = sorted(set(colors), key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+    if not uniq:
+        return []
+    if len(uniq) <= k:
+        return uniq
+    step = len(uniq) / k
+    return [uniq[int(t * step)] for t in range(k)]
+
+
+def fit_palette_anim_band(coverage, display_rgba, lo=WATER_LO, hi=WATER_HI):
+    """Quantize covered pixels' display colours into the band [lo,hi].
+
+    Returns (reps, index_bytes): reps is the band colours (len hi-lo+1, padded),
+    to be written into a POWERLEVEL palette at lo..hi; index_bytes[i] is the
+    assigned palette index (lo + nearest rep) for covered pixels, 0 elsewhere.
+    """
+    band = hi - lo + 1
+    n = len(coverage)
+    cols = [(display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2])
+            for i in range(n) if coverage[i]]
+    reps = quantize_band_colors(cols, band)
+    if not reps:
+        return [], bytes(n)
+    idx = bytearray(n)
+    for i in range(n):
+        if coverage[i]:
+            rgb = (display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2])
+            idx[i] = lo + _nearest_color_index(rgb, reps)
+    while len(reps) < band:
+        reps.append(reps[-1])
+    return reps, bytes(idx)
+
+
+def palette_anim_cells(level, ranges=COLOR_ANIM_RANGES):
+    """Fallback pixels (display_valid==0) whose material index sits in a colorAnim
+    band: (pixel_index, band_lo, band_count, offset_in_band). For preview."""
+    dv = level.get('display_valid')
+    mat = level['material']
+    cells = []
+    for i in range(len(mat)):
+        if dv and dv[i]:
+            continue
+        idx = mat[i]
+        for lo, hi in ranges:
+            if lo <= idx <= hi:
+                cells.append((i, lo, hi - lo + 1, idx - lo))
+                break
+    return cells
+
+
+def render_frame_incremental(base_rgb, ramp_cells, pal_cells, palette_rgb, cycles):
+    """Static `base_rgb` updated for `cycles`: MODERNLV ramp pixels + colorAnim
+    palette-band pixels (palette entries rotate, matching the engine's RotateFrom).
+    """
+    out = bytearray(base_rgb)
+    for i, cols, shift, phase in ramp_cells:
+        inc = (cycles >> shift) if shift < 32 else 0
+        r, g, b = cols[(phase + inc) % len(cols)]
+        out[i * 3], out[i * 3 + 1], out[i * 3 + 2] = r, g, b
+    for i, lo, count, j in pal_cells:
+        dist = (cycles >> 3) % count
+        src = lo + ((j + count - dist) % count)  # engine: entries[lo+i]=orig[lo+((i+count-dist)%count)]
+        out[i * 3] = palette_rgb[src * 3]
+        out[i * 3 + 1] = palette_rgb[src * 3 + 1]
+        out[i * 3 + 2] = palette_rgb[src * 3 + 2]
+    return bytes(out)
