@@ -13,6 +13,7 @@ including live animation, via liero_core.openliero (verified vs the engine).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import gi
@@ -30,6 +31,7 @@ from .gimp_colors import color_from_rgb8, rgb8_from_color  # noqa: E402
 
 RESP_EXPORT = 100
 _MODE_DISPLAY, _MODE_MASK, _MODE_ANIM = 'display', 'mask', 'anim'
+PARASITE_NAME = 'liero-level-export-settings'
 
 # Material choices offered per layer (label, key). key: int material, 'group:ID',
 # or None = skip (layer doesn't contribute to the mask).
@@ -254,6 +256,7 @@ class LevelExportDialog:
         self.dialog.set_default_size(1140, 680)
         self.dialog.get_content_area().show_all()
         self.indexed_pane.hide()  # default to layers source
+        self._restore_settings()  # re-apply last-used settings from the XCF
         self._ready = True
         self._rebuild_level()
 
@@ -780,6 +783,67 @@ class LevelExportDialog:
         else:
             chooser.destroy()
 
+    # ---- settings persistence (image parasite, survives in the XCF) ---------
+    def _set_combo_key(self, combo, key):
+        try:
+            combo.set_active(combo._keys.index(key))
+        except (ValueError, AttributeError):
+            pass
+
+    def _save_settings(self):
+        data = {
+            'mask_source': self.mask_source,
+            'ignore_hidden': self.ignore_hidden_check.get_active(),
+            'phase': self.phase_combo.get_active_id(),
+            'uncovered': self._combo_key(self.uncovered_combo),
+            'ramps': self.ramps,
+            'layers': {(layer.get_name() or ''):
+                       {'mat': self._combo_key(mc), 'anim': ac.get_active_id()}
+                       for layer, mc, ac in self.layer_rows},
+        }
+        try:
+            self.image.attach_parasite(
+                Gimp.Parasite.new(PARASITE_NAME, 1, json.dumps(data).encode()))
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    def _restore_settings(self):
+        try:
+            parasite = self.image.get_parasite(PARASITE_NAME)
+            if parasite is None:
+                return
+            data = json.loads(bytes(parasite.get_data()).decode())
+        except Exception:
+            return
+        self._suspend = True
+        try:
+            if isinstance(data.get('ramps'), list):
+                self.ramps = data['ramps']
+                self._rebuild_ramps_ui()
+            if data.get('phase'):
+                self.phase_combo.set_active_id(data['phase'])
+            if data.get('uncovered') is not None:
+                self._set_combo_key(self.uncovered_combo, data['uncovered'])
+            if 'ignore_hidden' in data:
+                self.ignore_hidden_check.set_active(bool(data['ignore_hidden']))
+            if data.get('mask_source') == 'indexed':
+                self.rb_indexed.set_active(True)
+                self.mask_source = 'indexed'
+                self.layers_pane.set_visible(False)
+                self.indexed_pane.set_visible(True)
+            self._build_layer_rows()
+            per = data.get('layers', {})
+            for layer, mat_combo, anim_combo in self.layer_rows:
+                saved = per.get(layer.get_name() or '')
+                if saved:
+                    if 'mat' in saved:
+                        self._set_combo_key(mat_combo, saved['mat'])
+                    if saved.get('anim'):
+                        anim_combo.set_active_id(saved['anim'])
+        finally:
+            self._suspend = False
+
     def run(self):
         try:
             while True:
@@ -789,6 +853,7 @@ class LevelExportDialog:
                     continue
                 break
         finally:
+            self._save_settings()
             self._stop_timer()
             if self._pending is not None:
                 GLib.source_remove(self._pending)
