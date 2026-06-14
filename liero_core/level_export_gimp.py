@@ -165,10 +165,12 @@ class LevelExportDialog:
             lbl = Gtk.Label(label=f"<small>{t}</small>", use_markup=True, xalign=0)
             hdr.pack_start(lbl, exp, exp, 0)
         self.layers_pane.pack_start(hdr, False, False, 0)
-        self.ignore_hidden_check = Gtk.CheckButton(label="Ignore hidden layers")
+        self.ignore_hidden_check = Gtk.CheckButton(label="Hide hidden layers from list")
         self.ignore_hidden_check.set_active(True)
-        self.ignore_hidden_check.connect('toggled', lambda _c: self._rebuild_level())
+        self.ignore_hidden_check.connect('toggled', self._on_toggle_hidden)
         self.layers_pane.pack_start(self.ignore_hidden_check, False, False, 0)
+        self.layer_rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.layers_pane.pack_start(self.layer_rows_box, False, False, 0)
         self._build_layer_rows()
         unc = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         unc.pack_start(Gtk.Label(label="Uncovered →", xalign=0), False, False, 0)
@@ -266,24 +268,42 @@ class LevelExportDialog:
         return combo._keys[i] if 0 <= i < len(combo._keys) else None
 
     def _build_layer_rows(self):
+        # remember current per-layer assignments so toggling the filter (or
+        # rebuilding) doesn't lose them
+        prev = {layer.get_id(): (self._combo_key(mc), rc.get_active())
+                for layer, mc, rc in self.layer_rows}
+        for child in list(self.layer_rows_box.get_children()):
+            self.layer_rows_box.remove(child)
         self.layer_rows = []
-        for layer in self.image.get_layers():
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            name = layer.get_name() or 'layer'
-            row.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
-            mat_combo = self._material_combo(default_key=_default_key_for(name))
-            row.pack_start(mat_combo, False, False, 0)
-            ramp_combo = Gtk.ComboBoxText()
-            self._fill_ramp_combo(ramp_combo, 0)
-            ramp_combo.connect('changed', lambda _c: self._rebuild_level())
-            row.pack_start(ramp_combo, False, False, 0)
-            self.layers_pane_row_add(row)
-            self.layer_rows.append((layer, mat_combo, ramp_combo))
+        hide_hidden = self.ignore_hidden_check.get_active()
+        self._suspend = True
+        try:
+            for layer in self.image.get_layers():
+                if hide_hidden and not layer.get_visible():
+                    continue
+                lid = layer.get_id()
+                name = layer.get_name() or 'layer'
+                mat_key = prev[lid][0] if lid in prev else _default_key_for(name)
+                ramp_idx = prev[lid][1] if lid in prev else 0
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                row.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
+                mat_combo = self._material_combo(default_key=mat_key)
+                row.pack_start(mat_combo, False, False, 0)
+                ramp_combo = Gtk.ComboBoxText()
+                self._fill_ramp_combo(ramp_combo, ramp_idx)
+                ramp_combo.connect('changed', lambda _c: self._rebuild_level())
+                row.pack_start(ramp_combo, False, False, 0)
+                self.layer_rows_box.pack_start(row, False, False, 0)
+                self.layer_rows.append((layer, mat_combo, ramp_combo))
+        finally:
+            self._suspend = False
+        self.layer_rows_box.show_all()
 
-    def layers_pane_row_add(self, row):
-        # rows are inserted before the "Uncovered" line; during initial build
-        # the pane only has the header, so append is fine.
-        self.layers_pane.pack_start(row, False, False, 0)
+    def _on_toggle_hidden(self, _c):
+        if not self._ready:
+            return
+        self._build_layer_rows()
+        self._rebuild_level()
 
     def _fill_ramp_combo(self, combo, keep):
         combo.remove_all()
@@ -462,11 +482,8 @@ class LevelExportDialog:
         return cov
 
     def _material_from_layers(self):
-        ignore_hidden = self.ignore_hidden_check.get_active()
         mat_layers, anim_layers = [], []
         for layer, mat_combo, ramp_combo in self.layer_rows:
-            if ignore_hidden and not layer.get_visible():
-                continue
             key = self._combo_key(mat_combo)
             if key is None:
                 continue
