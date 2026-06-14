@@ -256,3 +256,48 @@ def test_build_anim_phase_modes():
     # every mode marks both px animated (alpha 255, ramp 1)
     for buf in (a, a2, a3, a4):
         assert buf[0] == 1 and buf[3] == 255 and buf[4] == 1 and buf[7] == 255
+
+
+def test_powerlevel_palette_roundtrip():
+    pal = [(0, 0, 0)] * 256
+    pal[168] = (16, 32, 48); pal[171] = (200, 210, 220)
+    data = ol.build_level(2, 1, bytes([168, 169]), _rgba([(0, 0, 0, 0), (0, 0, 0, 0)]), palette=pal)
+    assert b'POWERLEVEL' in data and data.index(b'POWERLEVEL') < data.index(b'MODERNLV')
+    lvl = ol.extract_level(data)
+    assert lvl['palette'][168] == (16, 32, 48)        # already on the 6-bit grid
+    assert lvl['palette'][171] == (200, 208, 220)     # 210 -> 6bit -> 208
+
+
+def test_quantize_band_colors():
+    cols = [(0, 0, 0), (255, 255, 255), (0, 0, 0), (100, 100, 100)]
+    assert ol.quantize_band_colors(cols, 4) == [(0, 0, 0), (100, 100, 100), (255, 255, 255)]
+    assert len(ol.quantize_band_colors(cols, 2)) == 2
+
+
+def test_fit_palette_anim_band():
+    cov = bytes([1, 0, 1])
+    disp = _rgba([(0, 0, 0, 255), (0, 0, 0, 0), (255, 255, 255, 255)])
+    reps, idx = ol.fit_palette_anim_band(cov, disp, lo=168, hi=171)
+    assert len(reps) == 4              # padded to band width
+    assert idx[0] == 168 and idx[2] == 169 and idx[1] == 0
+
+
+def test_palette_anim_cycling_matches_engine():
+    w, h = 4, 1
+    mat = bytes([168, 169, 170, 171])
+    pal = [(0, 0, 0)] * 256
+    for k, v in enumerate((8, 20, 28, 40)):
+        pal[168 + k] = (v, 0, 0)
+    data = ol.build_level(w, h, mat, _rgba([(0, 0, 0, 0)] * 4), palette=pal)
+    lvl = ol.extract_level(data)
+    palrgb = bytearray(256 * 3)
+    for i, (r, g, b) in enumerate(lvl['palette']):
+        palrgb[i * 3:i * 3 + 3] = bytes((r, g, b))
+    pcells = ol.palette_anim_cells(lvl)
+    assert len(pcells) == 4
+    base = ol.render_frame_rgb(lvl, bytes(palrgb), 0)
+    assert base[0] == 8                                  # px0 idx168 -> pal[168]
+    assert ol.render_frame_incremental(base, [], pcells, bytes(palrgb), 0) == base
+    f8 = ol.render_frame_incremental(base, [], pcells, bytes(palrgb), 8)  # dist=1
+    assert f8[0] == 40                                   # px0 now shows pal[171]
+    assert f8[9] == 28                                   # px3 now shows pal[170]
