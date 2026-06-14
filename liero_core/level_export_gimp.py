@@ -165,6 +165,10 @@ class LevelExportDialog:
             lbl = Gtk.Label(label=f"<small>{t}</small>", use_markup=True, xalign=0)
             hdr.pack_start(lbl, exp, exp, 0)
         self.layers_pane.pack_start(hdr, False, False, 0)
+        self.ignore_hidden_check = Gtk.CheckButton(label="Ignore hidden layers")
+        self.ignore_hidden_check.set_active(True)
+        self.ignore_hidden_check.connect('toggled', lambda _c: self._rebuild_level())
+        self.layers_pane.pack_start(self.ignore_hidden_check, False, False, 0)
         self._build_layer_rows()
         unc = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         unc.pack_start(Gtk.Label(label="Uncovered →", xalign=0), False, False, 0)
@@ -458,8 +462,11 @@ class LevelExportDialog:
         return cov
 
     def _material_from_layers(self):
+        ignore_hidden = self.ignore_hidden_check.get_active()
         mat_layers, anim_layers = [], []
         for layer, mat_combo, ramp_combo in self.layer_rows:
+            if ignore_hidden and not layer.get_visible():
+                continue
             key = self._combo_key(mat_combo)
             if key is None:
                 continue
