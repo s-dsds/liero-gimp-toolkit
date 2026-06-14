@@ -48,6 +48,28 @@ COLOR_ANIM_RANGES = [(DEFAULT_COLOR_ANIM[i], DEFAULT_COLOR_ANIM[i + 1])
                      for i in range(0, len(DEFAULT_COLOR_ANIM), 2)]
 WATER_LO, WATER_HI = 168, 171
 
+# Byte-plane helpers: operate on whole arrays at C speed instead of per-pixel
+# Python loops. translate() maps bytes through a 256-entry table; big-int AND/OR
+# act like SIMD over the whole plane.
+_NZ_TO_1 = bytes([0] + [1] * 255)     # nonzero -> 1
+_NZ_TO_FF = bytes([0] + [255] * 255)  # nonzero -> 0xFF
+_Z_TO_FF = bytes([255] + [0] * 255)   # zero -> 0xFF
+_INV01 = bytes([1] + [0] * 255)       # logical NOT of a 0/1 plane
+
+
+def band_and(a, b):
+    return (int.from_bytes(a, 'big') & int.from_bytes(b, 'big')).to_bytes(len(a), 'big')
+
+
+def band_or(a, b):
+    return (int.from_bytes(a, 'big') | int.from_bytes(b, 'big')).to_bytes(len(a), 'big')
+
+
+def band_select(mask01, a, b):
+    """Per byte: a where mask01 != 0, else b (all equal length)."""
+    ff = mask01.translate(_NZ_TO_FF)
+    return band_or(band_and(a, ff), band_and(b, ff.translate(_Z_TO_FF)))
+
 LEGACY_W, LEGACY_H = 504, 350
 MAX_DIM = 4096
 SIZED_MAGIC = b"OLLEVEL2"
@@ -119,16 +141,16 @@ def build_level(
     if ramps:
         validate_ramps(ramps)
 
-    # display_data / display_valid from the RGBA display layer.
+    # display_data / display_valid from the RGBA display layer (vectorized:
+    # ARGB32 LE byte order is [B, G, R, A]; authored where alpha > 0).
+    alpha = bytes(display_rgba[3::4])
+    dv = bytearray(alpha.translate(_NZ_TO_1))
+    ff = alpha.translate(_NZ_TO_FF)
     dd = bytearray(cells * 4)
-    dv = bytearray(cells)
-    for i in range(cells):
-        if display_rgba[i * 4 + 3] > 0:  # alpha
-            struct.pack_into(
-                "<I", dd, i * 4,
-                argb32(display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2]),
-            )
-            dv[i] = 1
+    dd[0::4] = band_and(bytes(display_rgba[2::4]), ff)  # B
+    dd[1::4] = band_and(bytes(display_rgba[1::4]), ff)  # G
+    dd[2::4] = band_and(bytes(display_rgba[0::4]), ff)  # R
+    dd[3::4] = ff                                       # A = 0xFF where authored
 
     # display_anim from the anim layer; animated pixels repack phase into dd.
     da = bytearray(cells)
@@ -274,10 +296,16 @@ def material_flag_color(flags: int) -> Tuple[int, int, int]:
 def material_mask_rgb(material_id, materials_table=None) -> bytes:
     """W*H*3 RGB bytes colouring each index by its material category."""
     table = materials_table or DEFAULT_MATERIALS
-    out = bytearray(len(material_id) * 3)
-    for i, idx in enumerate(material_id):
-        out[i * 3:i * 3 + 3] = bytes(material_flag_color(table[idx]))
-    return out
+    lut = [material_flag_color(table[i]) for i in range(256)]
+    lr = bytes(c[0] for c in lut)
+    lg = bytes(c[1] for c in lut)
+    lb = bytes(c[2] for c in lut)
+    mat = bytes(material_id)
+    out = bytearray(len(mat) * 3)
+    out[0::3] = mat.translate(lr)  # index -> material colour, whole plane at C speed
+    out[1::3] = mat.translate(lg)
+    out[2::3] = mat.translate(lb)
+    return bytes(out)
 
 
 def _ramps_to_rgb(ramps: List[Dict]) -> List[Tuple[int, List[Tuple[int, int, int]]]]:
@@ -305,21 +333,33 @@ def render_frame_rgb(level: Dict, palette_rgb: bytes, cycles: int = 0) -> bytes:
     dv = level["display_valid"]
     da = level["display_anim"]
     ramps = _ramps_to_rgb(level.get("ramps") or [])
+    # palette-fallback plane for every pixel (pal[material]) at C speed
+    plr = bytes(palette_rgb[0::3])
+    plg = bytes(palette_rgb[1::3])
+    plb = bytes(palette_rgb[2::3])
+    mat = bytes(mat)
+    r = mat.translate(plr)
+    g = mat.translate(plg)
+    b = mat.translate(plb)
+    if dv:  # authored pixels: ARGB32 LE [B,G,R,A] -> R=dd[2::4], G=dd[1::4], B=dd[0::4]
+        dvb = bytes(dv)
+        r = band_select(dvb, bytes(dd[2::4]), r)
+        g = band_select(dvb, bytes(dd[1::4]), g)
+        b = band_select(dvb, bytes(dd[0::4]), b)
     out = bytearray(cells * 3)
-    for i in range(cells):
-        if dv and dv[i]:
-            ddv = int.from_bytes(dd[i * 4:i * 4 + 4], "little")
-            a = da[i] if da else 0
-            if a == 0 or a > len(ramps) or not ramps[a - 1][1]:
-                r, g, b = (ddv >> 16) & 0xFF, (ddv >> 8) & 0xFF, ddv & 0xFF
-            else:
+    out[0::3] = r
+    out[1::3] = g
+    out[2::3] = b
+    # animated pixels (usually a small subset): overwrite with ramp colour
+    if da:
+        for i in range(cells):
+            a = da[i]
+            if a and a <= len(ramps) and ramps[a - 1][1]:
                 shift, cols = ramps[a - 1]
+                ddv = int.from_bytes(dd[i * 4:i * 4 + 4], "little")
                 inc = (cycles >> shift) if shift < 32 else 0
-                r, g, b = cols[(ddv + inc) % len(cols)]  # ddv = per-pixel phase offset
-        else:
-            pi = mat[i]
-            r, g, b = palette_rgb[pi * 3], palette_rgb[pi * 3 + 1], palette_rgb[pi * 3 + 2]
-        out[i * 3], out[i * 3 + 1], out[i * 3 + 2] = r, g, b
+                cr, cg, cb = cols[(ddv + inc) % len(cols)]
+                out[i * 3], out[i * 3 + 1], out[i * 3 + 2] = cr, cg, cb
     return bytes(out)
 
 
@@ -388,7 +428,7 @@ def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0, *,
     """
     n = width * height
     out = bytearray(n * 4)
-    claimed = bytearray(n)
+    claimed = bytes(n)
     ph0 = default_phase & 0xFF
     ramp_cols = [cols for _shift, cols in _ramps_to_rgb(ramps)] if ramps else None
 
@@ -400,25 +440,28 @@ def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0, *,
     for cov, ramp in layers:
         if len(cov) != n:
             raise ValueError("coverage size mismatch")
-        for i in range(n):
-            if cov[i] and not claimed[i]:
-                claimed[i] = 1
-                if ramp <= 0:
-                    continue
-                mode = _mode(ramp)
-                if mode == 'wave':
-                    ph = ((i % width) + (i // width)) & 0xFF
-                elif mode == 'random':
-                    ph = (i * 2654435761) & 0xFF  # Knuth multiplicative hash
-                elif mode == 'color' and ramp_cols and ramp - 1 < len(ramp_cols) \
-                        and ramp_cols[ramp - 1] and display_rgba is not None:
-                    rgb = (display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2])
-                    ph = _nearest_color_index(rgb, ramp_cols[ramp - 1]) & 0xFF
-                else:
-                    ph = ph0
-                out[i * 4] = ramp & 0xFF
-                out[i * 4 + 1] = ph
-                out[i * 4 + 3] = 255
+        owned = band_and(bytes(cov), claimed.translate(_INV01))  # cov AND NOT claimed
+        claimed = band_or(claimed, bytes(cov))
+        if ramp <= 0:
+            continue
+        mode = _mode(ramp)
+        cols = ramp_cols[ramp - 1] if (ramp_cols and ramp - 1 < len(ramp_cols)) else None
+        i = owned.find(1)                       # iterate only the owned pixels
+        while i != -1:
+            if mode == 'wave':
+                ph = ((i % width) + (i // width)) & 0xFF
+            elif mode == 'random':
+                ph = (i * 2654435761) & 0xFF    # Knuth multiplicative hash
+            elif mode == 'color' and cols and display_rgba is not None:
+                ph = _nearest_color_index(
+                    (display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2]),
+                    cols) & 0xFF
+            else:
+                ph = ph0
+            out[i * 4] = ramp & 0xFF
+            out[i * 4 + 1] = ph
+            out[i * 4 + 3] = 255
+            i = owned.find(1, i + 1)
     return bytes(out)
 
 
