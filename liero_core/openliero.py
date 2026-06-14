@@ -343,26 +343,59 @@ def compose_material_mask(width: int, height: int, layers, default_index: int = 
     return bytes(out)
 
 
-def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0) -> bytes:
+def _nearest_color_index(rgb, cols) -> int:
+    """Index of the ramp colour closest to `rgb` (squared RGB distance)."""
+    bi, bd = 0, None
+    for k, (r, g, b) in enumerate(cols):
+        d = (r - rgb[0]) ** 2 + (g - rgb[1]) ** 2 + (b - rgb[2]) ** 2
+        if bd is None or d < bd:
+            bd, bi = d, k
+    return bi
+
+
+def build_anim_rgba(width: int, height: int, layers, default_phase: int = 0, *,
+                    phase_mode: str = 'sync', display_rgba: bytes = None,
+                    ramps: List[Dict] = None) -> bytes:
     """Animation RGBA (R=ramp 1-based, G=phase, A=255 where animated) from layer
     coverage. `layers` is (coverage, ramp_index) TOP-to-BOTTOM; topmost covered
     layer wins (a non-animated higher layer still blocks a lower animated one).
     ramp_index <= 0 means "covered but not animated".
+
+    `phase_mode` sets the per-pixel phase offset (the Green channel):
+      'sync'   -- all `default_phase` (pixels cycle together)
+      'color'  -- the ramp index of the pixel's own display colour, so frame 0
+                  reproduces the painted art, then flows (needs display_rgba +
+                  ramps)
+      'wave'   -- (x + y), a diagonal rolling stagger
+      'random' -- deterministic per-pixel hash (shimmer)
     """
     n = width * height
     out = bytearray(n * 4)
     claimed = bytearray(n)
-    ph = default_phase & 0xFF
+    ph0 = default_phase & 0xFF
+    ramp_cols = ([cols for _shift, cols in _ramps_to_rgb(ramps)]
+                 if (phase_mode == 'color' and ramps) else None)
     for cov, ramp in layers:
         if len(cov) != n:
             raise ValueError("coverage size mismatch")
         for i in range(n):
             if cov[i] and not claimed[i]:
                 claimed[i] = 1
-                if ramp > 0:
-                    out[i * 4] = ramp & 0xFF
-                    out[i * 4 + 1] = ph
-                    out[i * 4 + 3] = 255
+                if ramp <= 0:
+                    continue
+                if phase_mode == 'wave':
+                    ph = ((i % width) + (i // width)) & 0xFF
+                elif phase_mode == 'random':
+                    ph = (i * 2654435761) & 0xFF  # Knuth multiplicative hash
+                elif phase_mode == 'color' and ramp_cols and ramp - 1 < len(ramp_cols) \
+                        and ramp_cols[ramp - 1] and display_rgba is not None:
+                    rgb = (display_rgba[i * 4], display_rgba[i * 4 + 1], display_rgba[i * 4 + 2])
+                    ph = _nearest_color_index(rgb, ramp_cols[ramp - 1]) & 0xFF
+                else:
+                    ph = ph0
+                out[i * 4] = ramp & 0xFF
+                out[i * 4 + 1] = ph
+                out[i * 4 + 3] = 255
     return bytes(out)
 
 

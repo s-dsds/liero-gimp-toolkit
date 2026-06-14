@@ -235,3 +235,24 @@ def test_ordered_unique_colors():
     rgba = _rgba([(10, 10, 10, 255), (200, 200, 200, 255), (99, 99, 99, 0)])
     assert ol.ordered_unique_colors(rgba) == ['#0A0A0A', '#C8C8C8']  # luminance order, transparent skipped
     assert ol.ordered_unique_colors(_rgba([(0, 0, 0, 0)])) == []
+
+
+def test_build_anim_phase_modes():
+    cov = bytes([1, 1])  # one layer covers both px of a 2x1
+    ramps = [{"shift": 0, "colors": ["#000000", "#FFFFFF"]}]
+    disp = _rgba([(0, 0, 0, 255), (255, 255, 255, 255)])
+    # 'color': px0 black -> ramp index 0, px1 white -> ramp index 1
+    a = ol.build_anim_rgba(2, 1, [(cov, 1)], phase_mode='color', display_rgba=disp, ramps=ramps)
+    assert a[1] == 0 and a[5] == 1
+    # 'sync': default_phase everywhere
+    a2 = ol.build_anim_rgba(2, 1, [(cov, 1)], default_phase=7, phase_mode='sync')
+    assert a2[1] == 7 and a2[5] == 7
+    # 'wave': phase = x + y
+    a3 = ol.build_anim_rgba(2, 1, [(cov, 1)], phase_mode='wave')
+    assert a3[1] == 0 and a3[5] == 1
+    # 'random': deterministic hash
+    a4 = ol.build_anim_rgba(2, 1, [(cov, 1)], phase_mode='random')
+    assert a4[1] == (0 * 2654435761) & 0xFF and a4[5] == (1 * 2654435761) & 0xFF
+    # every mode marks both px animated (alpha 255, ramp 1)
+    for buf in (a, a2, a3, a4):
+        assert buf[0] == 1 and buf[3] == 255 and buf[4] == 1 and buf[7] == 255
