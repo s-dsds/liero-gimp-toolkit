@@ -151,11 +151,12 @@ class LevelExportDialog:
 
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         outer.set_border_width(8)
-        self.dialog.get_content_area().add(outer)
+        # pack with expand=True so the whole UI fills (and resizes with) the modal
+        self.dialog.get_content_area().pack_start(outer, True, True, 0)
 
         left_scroll = Gtk.ScrolledWindow()
         left_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        left_scroll.set_size_request(420, 600)
+        left_scroll.set_size_request(380, 300)  # min; grows with the modal
         outer.pack_start(left_scroll, False, False, 0)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         left.set_border_width(4)
@@ -257,7 +258,7 @@ class LevelExportDialog:
         self.canvas.set_pixels(self.w, self.h, b'\x00' * (self.w * self.h))
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_size_request(640, 600)
+        scroller.set_size_request(420, 300)  # min; the preview takes the extra space
         scroller.add(self.canvas.widget)
         self.canvas.hadj = scroller.get_hadjustment()
         self.canvas.vadj = scroller.get_vadjustment()
