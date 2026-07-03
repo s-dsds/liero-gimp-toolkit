@@ -12,6 +12,7 @@ from liero_core.colorops import (
     oklab_to_srgb,
     quantize,
     retarget_hue_f,
+    selection_mean_hue,
     similar_color_indices,
     srgb_to_oklab,
     to_float,
@@ -210,3 +211,12 @@ def test_retarget_respects_locked():
     ramp = to_float([(120, 72, 52), (156, 120, 88), (196, 168, 124)])
     out = retarget_hue_f(ramp, [0, 1, 2], target_hue=240.0, locked=[1])
     assert quantize([out[1]])[0] == (156, 120, 88)
+
+
+def test_selection_mean_hue():
+    ramp = to_float([(120, 72, 52), (156, 120, 88), (196, 168, 124)])
+    mean = selection_mean_hue(ramp, [0, 1, 2])
+    # brown/tan family sits around 60-70 deg in OKLCh
+    assert mean is not None and 40 < mean < 90
+    # all-gray selection has no hue
+    assert selection_mean_hue(to_float([(80, 80, 80)] * 3), [0, 1, 2]) is None

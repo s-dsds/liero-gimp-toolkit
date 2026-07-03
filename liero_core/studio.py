@@ -23,7 +23,8 @@ from gi.repository import Gimp, GimpUi, GLib, Gtk, GdkPixbuf, Gdk, Gio  # noqa: 
 import cairo  # noqa: E402
 
 from .colorops import (adjusted_palette_f, gradient_palette_f, quantize,  # noqa: E402
-                       to_float, uniquify_palette)
+                       retarget_hue_f, selection_mean_hue, to_float,
+                       uniquify_palette)
 from .defaults import (MATERIAL, MATERIAL_GROUPS, DEFAULT_MATERIALS,  # noqa: E402
                        ANIMATED_INDICES, expand_color_anim)
 from .formats import (load_palette, read_exe_color_anim, read_lev_pixels,  # noqa: E402
@@ -351,8 +352,15 @@ class PaletteStudioDialog:
         left.pack_start(write_row, False, False, 0)
 
         # ---- middle: controls ------------------------------------------------
+        # Wrapped in a ScrolledWindow so a tall control stack scrolls internally
+        # instead of forcing the whole dialog past the screen (which would clip
+        # the Close/Save/Apply buttons in the action area).
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        hbox.pack_start(side, False, False, 0)
+        side_scroll = Gtk.ScrolledWindow()
+        side_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        side_scroll.set_propagate_natural_width(True)
+        side_scroll.add(side)
+        hbox.pack_start(side_scroll, False, False, 0)
 
         self.info = Gtk.Label(xalign=0)
         self.info.set_line_wrap(True)
@@ -405,6 +413,43 @@ class PaletteStudioDialog:
         self.colorize = Gtk.CheckButton(label='Colorize (absolute hue/saturation — colors grays)')
         self.colorize.connect('toggled', lambda _b: self._recompute())
         side.pack_start(self.colorize, False, False, 0)
+
+        # ---- retexture (OKLab hue-target) ----------------------------------
+        side.pack_start(Gtk.Separator(), False, False, 4)
+        self.retexture_on = Gtk.CheckButton(
+            label='Retexture selection (OKLab hue-target)')
+        self.retexture_on.set_tooltip_text(
+            'Rotate the selected ramp to a target hue, keeping each rung\'s '
+            'perceptual lightness. Coherence collapses the hue spread; '
+            'Tint colors near-gray ramps.')
+        self.retexture_on.connect('toggled', lambda _b: self._recompute())
+        side.pack_start(self.retexture_on, False, False, 0)
+
+        self.retex_adj = {}
+        for key, label, hi, step in (('hue', 'Target hue°', 360.0, 1.0),
+                                     ('coherence', 'Coherence', 1.0, 0.01),
+                                     ('tint', 'Tint (color grays)', 1.0, 0.01)):
+            side.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
+            adj = Gtk.Adjustment(value=0.0, lower=0.0, upper=hi,
+                                 step_increment=step, page_increment=step * 10)
+            scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
+            scale.set_digits(2 if step < 1 else 0)
+            scale.set_value_pos(Gtk.PositionType.RIGHT)
+            adj.connect('value-changed', lambda _a: self._recompute())
+            self.retex_adj[key] = adj
+            side.pack_start(scale, False, False, 0)
+
+        preset_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for label, delta, tip in (
+                ('From sel', 0.0, 'Set target to the selection\'s current hue'),
+                ('Analog±30', 30.0, 'Analogous: selection hue + 30°'),
+                ('Triad±120', 120.0, 'Triadic: selection hue + 120°'),
+                ('Comp 180', 180.0, 'Complementary: selection hue + 180°')):
+            btn = Gtk.Button(label=label)
+            btn.set_tooltip_text(tip)
+            btn.connect('clicked', lambda _b, d=delta: self._retex_preset(d))
+            preset_row.pack_start(btn, True, True, 0)
+        side.pack_start(preset_row, False, False, 0)
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         commit = Gtk.Button(label='Commit')
@@ -686,10 +731,25 @@ class PaletteStudioDialog:
         return kwargs
 
     def _recompute(self):
-        self.preview = adjusted_palette_f(self.base, self.grid.selected,
-                                          **self._slider_kwargs())
+        pal = adjusted_palette_f(self.base, self.grid.selected,
+                                 **self._slider_kwargs())
+        if self.retexture_on.get_active() and self.grid.selected:
+            pal = retarget_hue_f(
+                pal, self.grid.selected,
+                target_hue=self.retex_adj['hue'].get_value(),
+                coherence=self.retex_adj['coherence'].get_value(),
+                tint=self.retex_adj['tint'].get_value())
+        self.preview = pal
         self._render_preview()
         self._update_info()
+
+    def _retex_preset(self, delta):
+        """Seed the target hue from the selection's current mean hue + delta."""
+        base = selection_mean_hue(self.base, self.grid.selected)
+        if base is None:  # all-gray selection: rotate from current target
+            base = self.retex_adj['hue'].get_value()
+        self.retexture_on.set_active(True)
+        self.retex_adj['hue'].set_value((base + delta) % 360.0)
 
     def _canvas_colors(self):
         """Colors for the preview canvases: animation + focus applied."""
@@ -978,6 +1038,9 @@ class PaletteStudioDialog:
         for key, _label, _lo, _hi, _step, default in SLIDERS:
             self.adjustments[key].set_value(default)
         self.colorize.set_active(False)
+        self.retexture_on.set_active(False)
+        for adj in self.retex_adj.values():
+            adj.set_value(0.0)
 
     def _on_commit(self, _btn):
         self.base = list(self.preview)

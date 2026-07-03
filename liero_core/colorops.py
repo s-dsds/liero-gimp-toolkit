@@ -186,6 +186,19 @@ def _wrap180(deg: float) -> float:
     return (deg + 180.0) % 360.0 - 180.0
 
 
+def selection_mean_hue(colors: Sequence[FColor], indices: Iterable[int],
+                       locked: Iterable[int] = ()) -> float | None:
+    """Chroma-weighted mean OKLCh hue (degrees) of the selection, or None if
+    it is all near-gray. Used by the UI to seed harmony presets."""
+    locked = set(locked)
+    lchs = [oklab_to_oklch(srgb_to_oklab(colors[i]))
+            for i in sorted(set(indices))
+            if i not in locked and 0 <= i < len(colors)]
+    if not lchs:
+        return None
+    return _chroma_weighted_mean_hue(lchs)
+
+
 def retarget_hue_f(colors: Sequence[FColor], indices: Iterable[int],
                    target_hue: float, coherence: float = 0.0, tint: float = 0.0,
                    locked: Iterable[int] = ()) -> List[FColor]:
