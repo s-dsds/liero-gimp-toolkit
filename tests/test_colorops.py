@@ -8,8 +8,12 @@ from liero_core.colorops import (
     adjusted_palette_f,
     clamp8,
     gradient_palette_f,
+    oklab_to_oklch,
+    oklab_to_srgb,
     quantize,
+    retarget_hue_f,
     similar_color_indices,
+    srgb_to_oklab,
     to_float,
     uniquify_palette,
 )
@@ -137,3 +141,72 @@ def test_uniquify_at_boundaries():
     out = uniquify_palette([(255, 255, 255)] * 3 + [(0, 0, 0)] * 2)
     assert len(set(out)) == 5
     assert all(0 <= v <= 255 for c in out for v in c)
+
+
+# --- OKLab / retexture -----------------------------------------------------
+
+def test_oklab_roundtrip():
+    for c in [(0, 0, 0), (255, 255, 255), (120, 72, 52), (76, 76, 76),
+              (168, 84, 24), (80, 104, 248)]:
+        back = oklab_to_srgb(srgb_to_oklab(c))
+        assert all(abs(a - b) < 0.5 for a, b in zip(c, back))
+
+
+def test_oklab_lightness_monotonic():
+    # OKLab L increases with a brighter gray
+    assert srgb_to_oklab((60, 60, 60))[0] < srgb_to_oklab((160, 160, 160))[0]
+
+
+def test_gradient_oklab_keeps_endpoints():
+    colors = to_float([(20, 20, 20), (255, 240, 0)])
+    colors = colors + to_float([(255, 255, 255)])  # 3 entries
+    out = gradient_palette_f(colors, [0, 1, 2], space='oklab')
+    # endpoints identical to rgb interpolation, midpoint differs
+    assert quantize([out[0]])[0] == (20, 20, 20)
+    assert quantize([out[2]])[0] == (255, 255, 255)
+    rgb_mid = quantize([gradient_palette_f(colors, [0, 1, 2])[1]])[0]
+    assert quantize([out[1]])[0] != rgb_mid
+
+
+def test_retarget_hue_moves_ramp_to_target():
+    # a brown ramp retargeted to ~240 deg (blue) lands its mean hue near target
+    ramp = to_float([(120, 72, 52), (156, 120, 88), (196, 168, 124)])
+    out = retarget_hue_f(ramp, [0, 1, 2], target_hue=240.0)
+    hues = [oklab_to_oklch(srgb_to_oklab(c))[2] for c in out]
+    # circular mean near 240
+    import math
+    mx = sum(math.cos(math.radians(h)) for h in hues)
+    my = sum(math.sin(math.radians(h)) for h in hues)
+    mean = math.degrees(math.atan2(my, mx)) % 360.0
+    assert abs(((mean - 240.0) + 180) % 360 - 180) < 8
+
+
+def test_retarget_preserves_lightness():
+    ramp = to_float([(120, 72, 52), (156, 120, 88), (196, 168, 124)])
+    before_L = [srgb_to_oklab(c)[0] for c in ramp]
+    out = retarget_hue_f(ramp, [0, 1, 2], target_hue=200.0, coherence=1.0)
+    after_L = [srgb_to_oklab(c)[0] for c in out]
+    assert all(abs(a - b) < 1e-6 for a, b in zip(before_L, after_L))
+
+
+def test_retarget_coherence_collapses_spread():
+    ramp = to_float([(180, 40, 40), (40, 180, 40), (40, 40, 180)])  # wild hues
+    out = retarget_hue_f(ramp, [0, 1, 2], target_hue=120.0, coherence=1.0)
+    hues = [oklab_to_oklch(srgb_to_oklab(c))[2] for c in out]
+    assert all(abs(((h - 120.0) + 180) % 360 - 180) < 1.0 for h in hues)
+
+
+def test_retarget_gray_needs_tint():
+    gray = to_float([(76, 76, 76), (116, 116, 116), (156, 156, 156)])
+    # without tint a gray ramp is unchanged (no hue to rotate)
+    same = quantize(retarget_hue_f(gray, [0, 1, 2], target_hue=30.0))
+    assert same == quantize(gray)
+    # with tint it gains chroma toward the target hue
+    tinted = retarget_hue_f(gray, [0, 1, 2], target_hue=30.0, tint=1.0)
+    assert any(max(c) - min(c) > 3 for c in quantize(tinted))
+
+
+def test_retarget_respects_locked():
+    ramp = to_float([(120, 72, 52), (156, 120, 88), (196, 168, 124)])
+    out = retarget_hue_f(ramp, [0, 1, 2], target_hue=240.0, locked=[1])
+    assert quantize([out[1]])[0] == (156, 120, 88)

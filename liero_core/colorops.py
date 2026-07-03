@@ -6,11 +6,16 @@ committed adjustments don't accumulate 8-bit rounding errors; quantize with
 """
 from __future__ import annotations
 import colorsys
+import math
 from typing import Iterable, List, Sequence, Tuple
 
 from .palette import Color
 
 FColor = Tuple[float, float, float]
+
+# OKLab chroma of a moderately saturated color; used as the reference level
+# when ``tint`` injects color into near-gray ramps (rock, shadow).
+REF_CHROMA = 0.12
 
 
 def clamp8(x: float) -> int:
@@ -79,12 +84,16 @@ def adjusted_palette(colors: Sequence[Color], indices: Iterable[int],
 
 
 def gradient_palette_f(colors: Sequence[FColor], indices: Iterable[int],
-                       locked: Iterable[int] = ()) -> List[FColor]:
-    """Re-ramp the selected indices as a linear gradient.
+                       locked: Iterable[int] = (), space: str = 'rgb') -> List[FColor]:
+    """Re-ramp the selected indices as a gradient between the endpoints.
 
     The selection is processed in index order; the first and last selected
     colors are kept as endpoints and everything in between is interpolated.
     This is the classic fix for a ramp that lost its contrast ("flattened").
+
+    ``space`` selects the interpolation space: ``'rgb'`` (linear channel lerp,
+    the original behavior) or ``'oklab'`` (perceptually even lightness/hue —
+    the endpoints are identical either way, only the intermediate rungs move).
     """
     idxs = sorted(set(indices))
     out = list(colors)
@@ -92,13 +101,122 @@ def gradient_palette_f(colors: Sequence[FColor], indices: Iterable[int],
         return out
     start = colors[idxs[0]]
     end = colors[idxs[-1]]
+    if space == 'oklab':
+        start_lab = srgb_to_oklab(start)
+        end_lab = srgb_to_oklab(end)
     locked = set(locked)
     span = len(idxs) - 1
     for pos, i in enumerate(idxs):
         if i in locked:
             continue
         t = pos / span
-        out[i] = tuple(s + (e - s) * t for s, e in zip(start, end))
+        if space == 'oklab':
+            lab = tuple(s + (e - s) * t for s, e in zip(start_lab, end_lab))
+            out[i] = oklab_to_srgb(lab)
+        else:
+            out[i] = tuple(s + (e - s) * t for s, e in zip(start, end))
+    return out
+
+
+# --- OKLab / OKLCh perceptual color space (Björn Ottosson) -----------------
+# All helpers take and return FColor (0-255 float RGB) to match the pipeline;
+# OKLab is (L, a, b) with L in ~0..1, OKLCh is (L, C, hue_degrees).
+
+def _srgb_to_linear(c: float) -> float:
+    c /= 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c: float) -> float:
+    s = 12.92 * c if c <= 0.0031308 else 1.055 * (max(c, 0.0) ** (1 / 2.4)) - 0.055
+    return s * 255.0
+
+
+def _cbrt(x: float) -> float:
+    return math.copysign(abs(x) ** (1 / 3), x)
+
+
+def srgb_to_oklab(rgb: FColor) -> Tuple[float, float, float]:
+    r, g, b = (_srgb_to_linear(v) for v in rgb)
+    l = _cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    m = _cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    s = _cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+
+
+def oklab_to_srgb(lab: Tuple[float, float, float]) -> FColor:
+    """OKLab back to float sRGB. May exceed 0..255 if out of gamut — the
+    caller clamps at display/export time via :func:`quantize`."""
+    L, a, b = lab
+    l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    return (
+        _linear_to_srgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+        _linear_to_srgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+        _linear_to_srgb(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s),
+    )
+
+
+def oklab_to_oklch(lab: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    L, a, b = lab
+    return (L, math.hypot(a, b), math.degrees(math.atan2(b, a)) % 360.0)
+
+
+def oklch_to_oklab(lch: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    L, C, h = lch
+    rad = math.radians(h)
+    return (L, C * math.cos(rad), C * math.sin(rad))
+
+
+def _chroma_weighted_mean_hue(lchs: Sequence[Tuple[float, float, float]]) -> float | None:
+    """Circular mean of hues weighted by chroma. None if all near-gray."""
+    x = sum(C * math.cos(math.radians(h)) for _L, C, h in lchs)
+    y = sum(C * math.sin(math.radians(h)) for _L, C, h in lchs)
+    if math.hypot(x, y) < 1e-6:
+        return None
+    return math.degrees(math.atan2(y, x)) % 360.0
+
+
+def _wrap180(deg: float) -> float:
+    return (deg + 180.0) % 360.0 - 180.0
+
+
+def retarget_hue_f(colors: Sequence[FColor], indices: Iterable[int],
+                   target_hue: float, coherence: float = 0.0, tint: float = 0.0,
+                   locked: Iterable[int] = ()) -> List[FColor]:
+    """Retexture the selected ramp toward ``target_hue`` (degrees, OKLCh).
+
+    The ramp is rotated rigidly so its chroma-weighted mean hue lands on
+    ``target_hue`` — each rung keeps its OKLab lightness (ramp shape intact)
+    and its hue offset from the ramp mean, so a natural ramp stays natural in
+    the new hue family.
+
+    ``coherence`` 0..1 collapses that hue spread toward the target (0 = keep
+    the original spread, just shifted; 1 = every rung exactly ``target_hue``).
+
+    ``tint`` 0..1 raises low-chroma rungs toward :data:`REF_CHROMA` so a gray
+    ramp (rock, shadow) actually takes on the color; vivid rungs are left
+    alone. With tint 0 a fully gray ramp is unchanged (no hue to rotate).
+    """
+    out = list(colors)
+    locked = set(locked)
+    sel = [i for i in sorted(set(indices))
+           if i not in locked and 0 <= i < len(out)]
+    if not sel:
+        return out
+    lchs = [oklab_to_oklch(srgb_to_oklab(out[i])) for i in sel]
+    mean_hue = _chroma_weighted_mean_hue(lchs)
+    if mean_hue is None:  # fully gray ramp: shift is a no-op, rely on tint
+        mean_hue = target_hue
+    for i, (L, C, h) in zip(sel, lchs):
+        new_h = target_hue + _wrap180(h - mean_hue) * (1.0 - coherence)
+        new_C = C + tint * max(0.0, REF_CHROMA - C)
+        out[i] = oklab_to_srgb(oklch_to_oklab((L, new_C, new_h)))
     return out
 
 
