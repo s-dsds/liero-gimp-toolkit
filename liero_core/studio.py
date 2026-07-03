@@ -344,10 +344,11 @@ class PaletteStudioDialog:
             '.wlsprt / .lev / LIERO.EXE (sprites and code untouched)')
         write_btn.connect('clicked', self._on_write_file)
         write_row.pack_start(write_btn, True, True, 0)
-        split_btn = Gtk.Button(label='Export by material…')
+        split_btn = Gtk.Button(label='Export palettes…')
         split_btn.set_tooltip_text(
-            'Create one GIMP palette per material (pick which)')
-        split_btn.connect('clicked', self._on_export_materials)
+            'Build a collection of GIMP palettes from materials, groups, '
+            'or any custom swatch selection')
+        split_btn.connect('clicked', self._on_export_palettes)
         write_row.pack_start(split_btn, True, True, 0)
         left.pack_start(write_row, False, False, 0)
 
@@ -954,56 +955,189 @@ class PaletteStudioDialog:
             traceback.print_exc()
             self.info.set_text(f"Write failed: {exc}")
 
-    def _export_material_palettes(self, selection: list, full: bool):
-        """Create the chosen per-material GIMP palettes (entry names keep the
-        original palette indices for traceability)."""
+    def _export_palettes(self, recipes):
+        """Create one GIMP palette per recipe. ``recipes`` is a list of
+        (name, sorted-indices); the special name 'full' with indices None
+        writes the whole palette with its material/anim metadata. Entry names
+        keep the original palette indices for traceability."""
         colors = quantize(self.preview)
         base_name = self._palette_name()
         created = []
-        if full:
-            make_gimp_palette(f"{base_name}-full", colors,
-                              table=self.table, animated=self.animated)
-            created.append(f"{base_name}-full")
-        for mat_name in selection:
-            idxs = indices_for_material(MATERIAL[mat_name], self.table)
-            if not idxs:
-                continue
-            pal = Gimp.Palette.new(f"{base_name}-{mat_name}")
-            for i in idxs:
-                pal.add_entry(f"{i:03d}" + (' ANIM' if i in self.animated else ''),
-                              color_from_rgb8(colors[i]))
-            created.append(f"{base_name}-{mat_name}")
+        for name, idxs in recipes:
+            pal_name = f"{base_name}-{name}"
+            if idxs is None:  # full palette
+                make_gimp_palette(pal_name, colors,
+                                  table=self.table, animated=self.animated)
+            else:
+                pal = Gimp.Palette.new(pal_name)
+                for i in idxs:
+                    pal.add_entry(
+                        f"{i:03d}" + (' ANIM' if i in self.animated else ''),
+                        color_from_rgb8(colors[i]))
+            created.append(pal_name)
         return created
 
-    def _on_export_materials(self, _btn):
-        picker = Gtk.Dialog(title='Export material palettes',
-                            transient_for=self.dialog)
+    def _suggest_palette_name(self, indices):
+        """A friendly default name for a selection: match a known material,
+        group, or animated set; otherwise 'custom'."""
+        sel = set(indices)
+        for mat_name, mat_value in MATERIAL.items():
+            if sel and sel == set(indices_for_material(mat_value, self.table)):
+                return mat_name.lower()
+        for _gid, (label, values) in MATERIAL_GROUPS.items():
+            if sel and sel == {i for i, m in enumerate(self.table) if m in values}:
+                return label.split('(')[0].strip().lower().replace(' ', '-')
+        if sel and sel == set(self.animated):
+            return 'animated'
+        return 'custom'
+
+    def _on_export_palettes(self, _btn):
+        picker = Gtk.Dialog(title='Export palettes', transient_for=self.dialog)
         picker.add_button('_Cancel', Gtk.ResponseType.CANCEL)
         picker.add_button('_Export', Gtk.ResponseType.OK)
-        box = picker.get_content_area()
-        box.set_spacing(4)
-        box.set_property('margin', 12)
-        box.add(Gtk.Label(label='Create these GIMP palettes:', xalign=0))
-        full_check = Gtk.CheckButton(label='Full palette')
-        full_check.set_active(True)
-        box.add(full_check)
-        checks = {}
+        picker.set_default_size(720, 520)
+        content = picker.get_content_area()
+        content.set_property('margin', 12)
+        panes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        content.add(panes)
+
+        # -- left: selectable palette grid + quick selectors --------------
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        panes.pack_start(left, False, False, 0)
+        left.pack_start(Gtk.Label(
+            label='Select swatches (click, Shift-range, Ctrl-toggle):',
+            xalign=0), False, False, 0)
+        grid = PaletteGrid(quantize(self.preview), self.table,
+                           animated=self.animated)
+        count_lbl = Gtk.Label(xalign=0)
+
+        def refresh_count():
+            count_lbl.set_text(f"{len(grid.selected)} selected")
+        grid._select_cb = lambda _i: (grid.queue_draw(), refresh_count())
+        frame = Gtk.Frame()
+        frame.add(grid.widget)
+        left.pack_start(frame, False, False, 0)
+        left.pack_start(count_lbl, False, False, 0)
+
+        mat_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        mat_combo = Gtk.ComboBoxText()
         for mat_name, mat_value in MATERIAL.items():
-            count = len(indices_for_material(mat_value, self.table))
-            check = Gtk.CheckButton(label=f"{mat_name} ({count} indices)")
-            check.set_active(count > 0)
-            check.set_sensitive(count > 0)
-            checks[mat_name] = check
-            box.add(check)
+            n = len(indices_for_material(mat_value, self.table))
+            mat_combo.append(str(mat_value), f"{mat_name} ({n})")
+        mat_combo.set_active(0)
+        mat_row.pack_start(mat_combo, True, True, 0)
+        mat_btn = Gtk.Button(label='Select material')
+        mat_btn.connect('clicked', lambda _b: (
+            grid.select_material(int(mat_combo.get_active_id() or 0)),
+            refresh_count()))
+        mat_row.pack_start(mat_btn, False, False, 0)
+        left.pack_start(mat_row, False, False, 0)
+
+        grp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for _gid, (label, values) in MATERIAL_GROUPS.items():
+            b = Gtk.Button(label=label.split('(')[0].strip())
+            b.set_tooltip_text(label)
+            b.connect('clicked', lambda _b, v=values: (
+                grid.select_materials(v), refresh_count()))
+            grp_row.pack_start(b, True, True, 0)
+        left.pack_start(grp_row, False, False, 0)
+
+        pick_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
+        def set_sel(indices):
+            grid.selected = set(indices)
+            grid.queue_draw()
+            refresh_count()
+        for label, fn in (
+                ('Animated', lambda: set_sel(self.animated)),
+                ('Invert', lambda: set_sel(set(range(256)) - grid.selected)),
+                ('All', lambda: set_sel(range(256))),
+                ('Clear', lambda: set_sel(set()))):
+            b = Gtk.Button(label=label)
+            b.connect('clicked', lambda _b, f=fn: f())
+            pick_row.pack_start(b, True, True, 0)
+        left.pack_start(pick_row, False, False, 0)
+
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        name_entry = Gtk.Entry()
+        name_entry.set_placeholder_text('palette name (e.g. grey-rock)')
+        add_row.pack_start(name_entry, True, True, 0)
+        add_btn = Gtk.Button(label='Add selection →')
+        add_row.pack_start(add_btn, False, False, 0)
+        left.pack_start(add_row, False, False, 0)
+
+        # -- right: the collection to export ------------------------------
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        panes.pack_start(right, True, True, 0)
+        right.pack_start(Gtk.Label(label='Palettes to export:', xalign=0),
+                         False, False, 0)
+        listbox = Gtk.ListBox()
+        list_scroll = Gtk.ScrolledWindow()
+        list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        list_scroll.add(listbox)
+        right.pack_start(list_scroll, True, True, 0)
+        recipes = []  # list of [name, indices-or-None]
+
+        def add_recipe(name, idxs):
+            name = name.strip() or 'custom'
+            # de-duplicate the display name
+            existing = {r[0] for r in recipes}
+            base, k = name, 2
+            while name in existing:
+                name = f"{base}-{k}"
+                k += 1
+            entry = [name, idxs]
+            recipes.append(entry)
+            row = Gtk.ListBoxRow()
+            rb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            count = 'full' if idxs is None else f"{len(idxs)} idx"
+            rb.pack_start(Gtk.Label(label=f"{name}  ({count})", xalign=0),
+                          True, True, 4)
+            rm = Gtk.Button(label='✕')
+            rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.connect('clicked', lambda _b: (
+                recipes.remove(entry), row.destroy()))
+            rb.pack_start(rm, False, False, 0)
+            row.add(rb)
+            row.show_all()
+            listbox.add(row)
+
+        def on_add(_b):
+            if not grid.selected:
+                return
+            idxs = sorted(grid.selected)
+            name = name_entry.get_text().strip() or self._suggest_palette_name(idxs)
+            add_recipe(name, idxs)
+            name_entry.set_text('')
+        add_btn.connect('clicked', on_add)
+
+        quick_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        full_btn = Gtk.Button(label='+ Full palette')
+        full_btn.connect('clicked', lambda _b: add_recipe('full', None))
+        quick_row.pack_start(full_btn, True, True, 0)
+        eachmat_btn = Gtk.Button(label='+ Each material')
+        eachmat_btn.set_tooltip_text('Add one palette per non-empty material')
+
+        def add_each_material(_b):
+            for mat_name, mat_value in MATERIAL.items():
+                idxs = indices_for_material(mat_value, self.table)
+                if idxs:
+                    add_recipe(mat_name.lower(), idxs)
+        eachmat_btn.connect('clicked', add_each_material)
+        quick_row.pack_start(eachmat_btn, True, True, 0)
+        right.pack_start(quick_row, False, False, 0)
+
+        # seed with the full palette so the common case is one click
+        add_recipe('full', None)
+
         picker.show_all()
         ok = picker.run() == Gtk.ResponseType.OK
-        selection = [n for n, c in checks.items() if c.get_active()]
-        full = full_check.get_active()
+        to_export = [(n, i) for n, i in recipes]
         picker.destroy()
-        if not ok:
+        if not ok or not to_export:
             return
         try:
-            created = self._export_material_palettes(selection, full)
+            created = self._export_palettes(to_export)
             Gimp.message("Created GIMP palettes:\n" + "\n".join(created))
         except Exception as exc:
             traceback.print_exc()
